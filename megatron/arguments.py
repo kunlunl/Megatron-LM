@@ -208,7 +208,7 @@ def validate_args(args, defaults={}):
     # across batches/microbatches. Due to additional communication overhead
     # during pipeline parallelism, it should not be set if sequence length
     # is constant during training.
-    args.variable_seq_lengths = False
+    #args.variable_seq_lengths = False
 
     # Iteration-based training.
     if args.train_iters:
@@ -384,6 +384,17 @@ def validate_args(args, defaults={}):
     # Disable bias gelu fusion if we are disabling bias altogether
     if not args.add_bias_linear:
         args.bias_gelu_fusion = False
+
+    # alibi_bias_max should larger than 0 when using alibi
+    if(args.use_alibi):
+        assert args.alibi_bias_max > 0, \
+            'alibi_bias_max must be larger than 0 when using alibi'
+    else:
+        args.alibi_bias_max = 0
+
+    if args.use_rotary_position_embeddings:
+        # TODO: adapt sft concatenation on rope later.
+        assert not args.sft_concat, "sft concat not adapted for rope yet."
 
     # Load retro args.
     if args.retro_workdir:
@@ -721,6 +732,8 @@ def _add_regularization_args(parser):
 def _add_training_args(parser):
     group = parser.add_argument_group(title='training')
 
+    mutex_group = parser.add_mutually_exclusive_group()
+
     group.add_argument('--micro-batch-size', type=int, default=None,
                        help='Batch size per model instance (local batch size). '
                        'Global batch size is local batch size times data '
@@ -780,9 +793,22 @@ def _add_training_args(parser):
                        'uniformly divided recompute unit, '
                        '2) block: the number of individual Transformer layers '
                        'to recompute within each pipeline stage.')
-    group.add_argument('--no-clone-scatter-output-in-embedding', action='store_false',
-                       help='If not set, clone the output of the scatter in embedding layer to GC original tensor.',
-                       dest='clone_scatter_output_in_embedding')
+    group.add_argument('--clone-scatter-output-in-embedding', action='store_true',
+                       help='Clone the output of the scatter in embedding layer to GC original tensor.')
+    group.add_argument('--variable-seq-lengths', action='store_true', default=False,
+                       help='Using variable seq length across micro-batch')
+    group.add_argument('--sft-dataset', action='store_true', default=False,
+                       help='Using sft datasets.')
+    mutex_group.add_argument('--sft-padding', action='store_true', default=False,
+                       help='Padding to max_length during sft.')
+    mutex_group.add_argument('--sft-concat', action='store_true', default=False,
+                       help='concat samples to avoid useless padding and balance load within dp group during sft.')
+    group.add_argument('--ignore-index', type=int, default=-100,
+                       help="Symbol that do not calculate loss.")
+    group.add_argument("--padding-side", type=str, default="right",
+                       help="Huggingface tokenizer padding side.")
+    group.add_argument("--use-fast", action='store_true', default=False,
+                       help='Enable huggingface tokenizer use_fast.')
 
 
     # deprecated
@@ -1176,7 +1202,11 @@ def _add_data_args(parser):
                                 'GPT2BPETokenizer',
                                 'SentencePieceTokenizer',
                                 'GPTSentencePieceTokenizer',
-                                'NullTokenizer'],
+                                'NullTokenizer',
+                                'NullTokenizerSft',
+                                'NullTokenizerPlusOne',
+                                'HuggingfacePretrained',
+                                'LLamaCsharp'],
                        help='What type of tokenizer to use.')
     group.add_argument('--tokenizer-model', type=str, default=None,
                        help='Sentencepiece tokenizer model.')

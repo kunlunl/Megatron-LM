@@ -33,8 +33,10 @@ try:
     import flash_attn 
     if(flash_attn.__version__.startswith("2.")):
         from flash_attn.flash_attn_interface import flash_attn_varlen_func as flash_attn_unpadded_func
+        from flash_attn.bert_padding import unpad_input, pad_input
     elif(flash_attn.__version__.startswith("1.")):
         from flash_attn.flash_attn_interface import flash_attn_unpadded_func
+        from flash_attn.bert_padding import unpad_input, pad_input
     else:
         flash_attn_unpadded_func = None
 except ImportError:
@@ -391,11 +393,17 @@ class FlashSelfAttention(torch.nn.Module):
         assert flash_attn_unpadded_func is not None, ('Please install FlashAttention first, '
                                                       'e.g., with pip install flash-attn')
         assert rearrange is not None, 'Please install einops first, e.g., with pip install einops'
+        args = get_args()
         self.causal = causal
         self.softmax_scale = softmax_scale
         self.dropout_p = attention_dropout
-
-    def forward(self, q, k, v):
+        self.alibi_bias_max = alibi_bias_max
+        self.sft_dataset = args.sft_dataset
+        self.variable_seq_lengths = args.variable_seq_lengths
+        self.sft_padding = args.sft_padding
+        self.sft_concat = args.sft_concat
+  
+    def forward(self, q, k, v, attention_mask=None):
         """Implements the multihead softmax attention.
         Arguments
         ---------
@@ -405,15 +413,33 @@ class FlashSelfAttention(torch.nn.Module):
         assert all((i.dtype in [torch.float16, torch.bfloat16] for i in (q,k,v)))
         assert all((i.is_cuda for i in (q,k,v)))
 
+        if attention_mask is not None:
+            assert self.sft_padding or self.sft_concat, (
+                "attention_mask is only supported when sft_padding or sft_concat is True"
+            )
+        else:
+            assert not self.sft_padding and not self.sft_concat, (
+                "attention_mask should be provided when not self.sft_padding and not self.sft_concat"
+            )
         if mpu.get_context_parallel_world_size() >= 2:
             return dattention.dattention(q, k, v, cp_group=mpu.get_context_parallel_group())
 
         batch_size, seqlen_q = q.shape[0], q.shape[1]
         seqlen_k = k.shape[1]
 
-        q, k, v = [rearrange(x, 'b s ... -> (b s) ...') for x in [q, k, v]]
-        cu_seqlens_q = torch.arange(0, (batch_size + 1) * seqlen_q, step=seqlen_q, dtype=torch.int32,
-                                    device=q.device)
+        if self.sft_concat:
+            seqlen_q = attention_mask.max().item()
+            seqlen_k = seqlen_q
+            cu_seqlens_q = F.pad(attention_mask.cumsum(0), (1, 0), 'constant', 0).int().to(q.device)
+            q, k, v = [x.squeeze(0) for x in [q, k, v]]
+        else:
+            if attention_mask is None:
+                q, k, v = [rearrange(x, 'b s ... -> (b s) ...') for x in [q, k, v]]
+            cu_seqlens_q = torch.arange(0, (batch_size + 1) * seqlen_q, step=seqlen_q, dtype=torch.int32,
+                                        device=q.device)
+
+        tp_rank = mpu.get_tensor_model_parallel_rank()
+        tp_world_size = mpu.get_tensor_model_parallel_world_size()
 
         if self.training:
             # during training q,k,v always have same seqlen
@@ -422,21 +448,71 @@ class FlashSelfAttention(torch.nn.Module):
             is_causal = self.causal
             cu_seqlens_k = cu_seqlens_q
         else:
+            assert not self.sft_concat
             # turn off FA causal mask after first inference autoregressive iteration
             # only on first autoregressive step q,k,v have same seqlen
             is_causal = seqlen_q == seqlen_k
             cu_seqlens_k = torch.arange(0, (batch_size + 1) * seqlen_k, step=seqlen_k, dtype=torch.int32,
                         device=q.device)
             self.dropout_p = 0
-
-        output = flash_attn_unpadded_func(
-            q, k, v, cu_seqlens_q, cu_seqlens_k, seqlen_q, seqlen_k,
-            self.dropout_p,
-            softmax_scale=self.softmax_scale, causal=is_causal
-        )
-
-        output = rearrange(output, '(b s) ... -> b s ...', b=batch_size)
-        return output
+        tp_rank = mpu.get_tensor_model_parallel_rank()
+        tp_world_size = mpu.get_tensor_model_parallel_world_size()
+        if not self.sft_dataset:
+            # for pretrain rope.
+            if(self.alibi_bias_max == 0):
+                output = self.flash_attn_unpadded_func(
+                    q, k, v, cu_seqlens_q, cu_seqlens_k, seqlen_q, seqlen_k,
+                    self.dropout_p,
+                    softmax_scale=self.softmax_scale, causal=is_causal,
+                )
+            else:
+            # for pretrain alibi.(175B pretrain/13Bv1 pretrain)
+                output = self.flash_attn_unpadded_func(
+                    q, k, v, cu_seqlens_q, cu_seqlens_k, seqlen_q, seqlen_k,
+                    self.dropout_p,
+                    softmax_scale=self.softmax_scale, causal=is_causal,
+                    alibi_bias_max=self.alibi_bias_max,
+                    tp_rank=tp_rank,
+                    tp_world_size=tp_world_size
+                )
+            output = rearrange(output, '(b s) ... -> b s ...', b=batch_size)
+            return output
+        else:
+            extra_args = {
+                'alibi_bias_max': self.alibi_bias_max,
+                'tp_rank': tp_rank,
+                'tp_world_size': tp_world_size
+            } if self.alibi_bias_max != 0 else {}
+            if self.sft_concat:
+                output = self.flash_attn_unpadded_func(
+                    q, k, v, cu_seqlens_q, cu_seqlens_k, seqlen_q, seqlen_k,
+                    self.dropout_p,
+                    softmax_scale=self.softmax_scale, causal=is_causal,
+                    **extra_args
+                )
+                return output.unsqueeze(0)
+            if attention_mask is None:
+                #var length
+                output = self.flash_attn_unpadded_func(
+                    q, k, v, cu_seqlens_q, cu_seqlens_k, seqlen_q, seqlen_k,
+                    self.dropout_p,
+                    softmax_scale=self.softmax_scale, causal=is_causal,
+                    **extra_args
+                )
+                output = rearrange(output, '(b s) ... -> b s ...', b=batch_size)
+            else:
+                #sft padding
+                q_unpad, indices, cu_seqlens_q, max_s = unpad_input(q, attention_mask)
+                k_unpad, _, cu_seqlens_k, _ = unpad_input(k, attention_mask)
+                v_unpad, _, cu_seqlens_v, _ = unpad_input(v, attention_mask)
+                output_unpad = self.flash_attn_unpadded_func(
+                    q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, seqlen_q, seqlen_k,
+                    self.dropout_p,
+                    softmax_scale=self.softmax_scale, causal=is_causal,
+                    **extra_args
+                )
+                output = pad_input(output_unpad, indices, batch_size, seqlen_q)
+            return output
 
 
 class ParallelAttention(MegatronModule):
@@ -463,7 +539,10 @@ class ParallelAttention(MegatronModule):
         self.cp_overlap = args.context_parallel_comm_overlap_gemm and mpu.get_context_parallel_world_size() >= 2
         self.cp_offload_mode = args.kaimm_cp_offload_mode
         self.use_fast_rope = args.use_fast_rope
+        self.sft_padding = args.sft_padding
+        self.sft_concat = args.sft_concat
         assert not self.cp_overlap or not args.use_rotary_position_embeddings or self.use_fast_rope, "CP overlap requries using fast rope"
+        assert not (args.context_parallel_size >= 2 and args.sft_dataset), "CP not compatible with sft"
 
         self.group_query_attention = args.group_query_attention
         self.num_query_groups = args.num_query_groups
@@ -758,7 +837,9 @@ class ParallelAttention(MegatronModule):
                 context_layer = self.core_attention(
                     query_layer, key_layer, value_layer, attention_mask)
         else:
-            if self.cp_overlap:
+            if not self.sft_padding and not self.sft_concat:
+                attention_mask = None
+            if self.cp_overlap:                    
                 qi = query_layer.transpose(0, 1)
                 tp_world_size = mpu.get_tensor_model_parallel_world_size()
                 tp_rank = mpu.get_tensor_model_parallel_rank()
@@ -776,9 +857,9 @@ class ParallelAttention(MegatronModule):
                         for x in (query_layer, key_layer, value_layer)]
                 if not self.sequence_parallel:
                     with tensor_parallel.get_cuda_rng_tracker().fork():
-                        context_layer = self.core_attention_flash(q, k, v)
+                        context_layer = self.core_attention_flash(q, k, v, attention_mask)
                 else:
-                    context_layer = self.core_attention_flash(q, k, v)
+                    context_layer = self.core_attention_flash(q, k, v, attention_mask)
             if isinstance(context_layer, tuple):
                 context_layer, cp_data_to_save = context_layer
             context_layer = rearrange(context_layer, 'b s h d -> s b (h d)').contiguous()

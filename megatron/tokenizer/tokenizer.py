@@ -7,6 +7,7 @@ from abc import abstractmethod
 
 from .bert_tokenization import FullTokenizer as FullBertTokenizer
 from .gpt2_tokenization import GPT2Tokenizer
+from .tokenization_llama_csharp import LlamaTokenizer as LlamaTokenizerCSharp
 
 
 def build_tokenizer(args):
@@ -39,6 +40,24 @@ def build_tokenizer(args):
     elif args.tokenizer_type == 'NullTokenizer':
         assert args.vocab_size is not None
         tokenizer = _NullTokenizer(args.vocab_size)
+    elif args.tokenizer_type == 'NullTokenizerSft':
+        tokenizer = _NullTokenizerNotPlusOne(args.tokenizer_model)
+    elif args.tokenizer_type == 'NullTokenizerPlusOne':
+        tokenizer = _NullTokenizerPlusOne(args.tokenizer_model)    
+    elif args.tokenizer_type == 'HuggingfacePretrained':
+        import transformers
+        tokenizer = transformers.AutoTokenizer.from_pretrained(
+            args.tokenizer_model,
+            cache_dir=None,
+            model_max_length=args.seq_length,
+            padding_side=args.padding_side,
+            use_fast=args.use_fast
+        )
+        
+    elif args.tokenizer_type == 'LLamaCsharp':
+        import transformers
+        #Node(liaoyiqiao): Related Doc: https://docs.corp.kuaishou.com/k/home/VV0pT__g9xeo/fcACD1AddDAWsen-JK1Xqwlre?ro=false
+        tokenizer = LlamaTokenizerCSharp.from_pretrained(args.tokenizer_model, add_bos_token=False, add_eos_token=False)
     else:
         raise NotImplementedError('{} tokenizer is not '
                                   'implemented.'.format(args.tokenizer_type))
@@ -507,6 +526,76 @@ class _NullTokenizer:
         vocab_size = int(vocab_size)
         self._eos_id = vocab_size
         self.vocab_size = vocab_size+1
+
+    def tokenize(self, text):
+        return [int(x) for x in text.split(' ')]
+
+    def detokenize(self, ids):
+        text = [str(x) for x in ids]
+        return ' '.join(text)
+
+    @property
+    def cls(self):
+        return -1
+
+    @property
+    def sep(self):
+        return -1
+
+    @property
+    def mask(self):
+        return -1
+
+    @property
+    def eod(self):
+        return self._eos_id
+
+    @property
+    def additional_special_tokens_ids(self):
+        return None
+
+
+class _NullTokenizerNotPlusOne:
+    def __init__(self, tokenizer_model):
+        self.tokenizer = LlamaTokenizerCSharp.from_pretrained(tokenizer_model, add_bos_token=False, add_eos_token=False)
+        self.pad_token_id = self.tokenizer.pad_token_id
+        self._eos_id = self.tokenizer.vocab_size - 1
+        self.vocab_size = self.tokenizer.vocab_size
+
+    def tokenize(self, text):
+        return [int(x) for x in text.split(' ')]
+
+    def detokenize(self, ids):
+        text = [str(x) for x in ids]
+        return ' '.join(text)
+
+    @property
+    def cls(self):
+        return -1
+
+    @property
+    def sep(self):
+        return -1
+
+    @property
+    def mask(self):
+        return -1
+
+    @property
+    def eod(self):
+        return self._eos_id
+
+    @property
+    def additional_special_tokens_ids(self):
+        return None
+
+
+class _NullTokenizerPlusOne:
+    def __init__(self, tokenizer_model):
+        self.tokenizer = LlamaTokenizerCSharp.from_pretrained(tokenizer_model, add_bos_token=False, add_eos_token=False)
+        self.pad_token_id = self.tokenizer.pad_token_id
+        self._eos_id = self.tokenizer.vocab_size
+        self.vocab_size = self.tokenizer.vocab_size + 1
 
     def tokenize(self, text):
         return [int(x) for x in text.split(' ')]
