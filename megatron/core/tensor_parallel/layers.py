@@ -666,10 +666,10 @@ class LinearQKVWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
         if k_pos_emb is not None:
             import fast_rotary_pos_emb
             ki = fast_rotary_pos_emb.forward(ki, k_pos_emb, True)
-        if b >= 2:
-            warnings.warn("There is a performance regression issue that can be fixed by customizing the fast_roraty_pos_emb output layout")
-            assert not ki.is_contiguous(), "Remove the branch if the performance regression issue is fixed"
-            ki = ki.contiguous()
+            if b >= 2:
+                warnings.warn("There is a performance regression issue that can be fixed by customizing the fast_roraty_pos_emb output layout")
+                assert not ki.is_contiguous(), "Remove the branch if the performance regression issue is fixed"
+                ki = ki.contiguous()
         handle.wait()
         assert ki.is_contiguous()
         handle = torch.distributed.all_gather_into_tensor(kv[0], ki, group=get_context_parallel_group(), async_op=True)
