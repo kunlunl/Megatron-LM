@@ -348,6 +348,8 @@ def _communicate(*, tensor_send_next: Optional[torch.Tensor],
         custom_args['variable_seq_lengths'] = variable_seq_lengths
     else:
         p2p_func = _p2p_ops
+        custom_args['variable_seq_lengths'] = variable_seq_lengths
+
 
     reqs = p2p_func(tensor_send_prev=tensor_send_prev,
                     tensor_recv_prev=tensor_recv_prev,

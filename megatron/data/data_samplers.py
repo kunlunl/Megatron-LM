@@ -219,10 +219,10 @@ class DataCollatorForSupervisedDatasetWithOnlySP(object):
 
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
         input_ids, label_mask = tuple([instance[key] for instance in instances] for key in ("input_ids", "label_mask"))
-        cur_length = input_ids[0].shape[0]
+        cur_length = max([input_id.shape[0] for input_id in input_ids])
         padded_length = math.ceil(cur_length / self.tp_world_size) * self.tp_world_size
-        padding_length = padded_length - cur_length
         for i in range(len(input_ids)):
+            padding_length = padded_length - input_ids[i].shape[0]
             input_ids[i] = np.pad(input_ids[i], (0, padding_length), constant_values=self.tokenizer.pad_token_id)
             label_mask[i] = np.pad(label_mask[i], (0, padding_length), constant_values=0)
         return dict(

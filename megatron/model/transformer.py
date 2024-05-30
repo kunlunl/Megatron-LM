@@ -542,7 +542,6 @@ class ParallelAttention(MegatronModule):
         self.sft_padding = args.sft_padding
         self.sft_concat = args.sft_concat
         assert not self.cp_overlap or not args.use_rotary_position_embeddings or self.use_fast_rope, "CP overlap requries using fast rope"
-        assert not (args.context_parallel_size >= 2 and args.sft_dataset), "CP not compatible with sft"
 
         self.group_query_attention = args.group_query_attention
         self.num_query_groups = args.num_query_groups
