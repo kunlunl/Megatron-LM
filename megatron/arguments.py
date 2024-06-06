@@ -392,9 +392,6 @@ def validate_args(args, defaults={}):
     else:
         args.alibi_bias_max = 0
 
-    if args.use_rotary_position_embeddings:
-        # TODO: adapt sft concatenation on rope later.
-        assert not args.sft_concat, "sft concat not adapted for rope yet."
 
     # Load retro args.
     if args.retro_workdir:

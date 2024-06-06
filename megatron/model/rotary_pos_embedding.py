@@ -7,9 +7,10 @@
 import functools
 import importlib.util
 import torch
-
+from torch import Tensor
 from megatron.core.context_parallel import dattention
 from torch import einsum, nn
+from typing import Optional
 
 __all__ = ['RotaryEmbedding', 'apply_rotary_pos_emb']
 
@@ -70,7 +71,7 @@ def _rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
-def apply_rotary_pos_emb(t, freqs, use_fast_rope=False):
+def apply_rotary_pos_emb_bshd(t, freqs, use_fast_rope=False):
     """
     input tensor t is of shape [seq_length, ..., dim]
     rotary positional embeding tensor freqs is of shape [seq_length, ..., dim]
@@ -78,7 +79,6 @@ def apply_rotary_pos_emb(t, freqs, use_fast_rope=False):
     """
     if use_fast_rope:
         return FastRotaryPosEmbFunction.apply(t, freqs, True)
-
     rot_dim = freqs.shape[-1]
     # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
     t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
@@ -88,3 +88,42 @@ def apply_rotary_pos_emb(t, freqs, use_fast_rope=False):
     # Note(yuantailing): Calculate sin/cos in fp32 to match fast rope precision
     t = (t * freqs.cos().to(t.dtype)) + (_rotate_half(t) * freqs.sin().to(t.dtype))
     return torch.cat((t, t_pass), dim=-1)
+def apply_rotary_pos_emb_thd(t: Tensor, cu_seqlens: Tensor, freqs: Tensor) -> Tensor:
+    """A baseline implementation of applying RoPE for `thd` format.
+    Args:
+        t (Tensor): Input tensor T is of shape [t, h, d]
+        cu_seqlens(Tensor):  Cumulative sum of sequence lengths in a batch for `t`,
+        with shape [b + 1] and dtype torch.int32.
+        freqs (Tensor): Rotary Positional embedding tensor freq is of shape [max_s, 1, 1, d]
+    Returns:
+        Tensor: Shape [t, h, d]. The input tensor after applying RoPE.
+    """
+
+    seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+    splits = torch.split(t, seqlens)
+    outputs = []
+    for i, x in enumerate(splits):
+        reshaped_x = x
+        freq_slice = freqs[:reshaped_x.size(0)]
+        outputs.append(apply_rotary_pos_emb_bshd(reshaped_x, freq_slice))
+    return torch.cat(outputs,dim=0)
+
+
+def apply_rotary_pos_emb(
+    t: Tensor, freqs: Tensor, cu_seqlens: Optional[Tensor] = None, use_fast_rope=False
+):
+    """
+    Reroute to the appropriate apply_rotary_pos_emb function depending on
+    fused/unfused kernels, or bshd (conventional) / thd (packed seq) format
+    """
+
+    if use_fast_rope:
+        if cu_seqlens is None:
+            return FastRotaryPosEmbFunction.apply(t, freqs, True)
+        else:
+            raise AssertionError("packing not compatible with fast rope")
+    else:
+        if cu_seqlens is None:
+            return apply_rotary_pos_emb_bshd(t, freqs)
+        else:
+            return apply_rotary_pos_emb_thd(t, cu_seqlens, freqs)
