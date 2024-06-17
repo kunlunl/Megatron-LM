@@ -11,7 +11,14 @@ from torch import Tensor
 from megatron.core.context_parallel import dattention
 from torch import einsum, nn
 from typing import Optional
+try:
+    from apex.transformer.functional import (
+        fused_apply_rotary_pos_emb_thd,
+    )
 
+    HAVE_APPLY_ROPE_FUSION = True
+except:
+    HAVE_APPLY_ROPE_FUSION = False
 __all__ = ['RotaryEmbedding', 'apply_rotary_pos_emb']
 
 class RotaryEmbedding(nn.Module):
@@ -121,7 +128,7 @@ def apply_rotary_pos_emb(
         if cu_seqlens is None:
             return FastRotaryPosEmbFunction.apply(t, freqs, True)
         else:
-            raise AssertionError("packing not compatible with fast rope")
+            return fused_apply_rotary_pos_emb_thd(t, cu_seqlens, freqs)
     else:
         if cu_seqlens is None:
             return apply_rotary_pos_emb_bshd(t, freqs)
