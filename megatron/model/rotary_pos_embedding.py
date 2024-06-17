@@ -22,10 +22,11 @@ except:
 __all__ = ['RotaryEmbedding', 'apply_rotary_pos_emb']
 
 class RotaryEmbedding(nn.Module):
-    def __init__(self, dim, use_fast_rope=False, context_parallel_world_size=1, context_parallel_rank=0):
+    def __init__(self, dim, use_fast_rope=False, use_thd_rope=False, context_parallel_world_size=1, context_parallel_rank=0):
         super().__init__()
         self.dim = dim
         self.use_fast_rope = use_fast_rope
+        self.use_thd_rope = use_thd_rope
         self.context_parallel_world_size = context_parallel_world_size
         self.context_parallel_rank = context_parallel_rank
         self.register_buffer('dummy_buffer', torch.tensor(1.))
@@ -44,7 +45,7 @@ class RotaryEmbedding(nn.Module):
         # emb [seq_length, .., dim]
         from einops import rearrange
         freqs = rearrange(emb, 'n d -> n 1 1 d')
-        if self.use_fast_rope:
+        if (not self.use_thd_rope) and self.use_fast_rope:
             freqs_sin_cos = torch.cat([freqs.sin()[..., None], freqs.cos()[..., None]], dim=-1).reshape(*freqs.shape[:-1], -1)
             return freqs_sin_cos.type_as(self.dummy_buffer)
         # Note(yuantailing): Store freqs (before sin/cos) in fp32 to match fast rope precision
@@ -128,7 +129,8 @@ def apply_rotary_pos_emb(
         if cu_seqlens is None:
             return FastRotaryPosEmbFunction.apply(t, freqs, True)
         else:
-            return fused_apply_rotary_pos_emb_thd(t, cu_seqlens, freqs)
+            t = t.squeeze(1) 
+            return fused_apply_rotary_pos_emb_thd(t, cu_seqlens, freqs).transpose(0, 1) 
     else:
         if cu_seqlens is None:
             return apply_rotary_pos_emb_bshd(t, freqs)
