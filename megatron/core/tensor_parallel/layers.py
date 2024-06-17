@@ -321,6 +321,9 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
             if(not sequence_parallel): # rs
                 output = torch.matmul(total_input, weight.t())
                 output = _reduce_scatter_along_first_dim(output)
+                total_input = total_input.view(-1, total_input.shape[-1])
+
+
             else: # ag
                 out_dim_size[0]  = out_dim_size[0] * world_size
                 out_dim_size[-1] = weight.shape[0]
@@ -396,7 +399,8 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
             ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG
             dim_size = list(grad_output.shape)
 
-            ub_bw_obj.copy_input_to_ubuf(grad_output, True)
+            # ub_bw_obj.copy_input_to_ubuf(grad_output, True)
+            ub_bw_obj.copy_input_to_ubuf(grad_output.view(-1, grad_output.shape[-1]), True)
             grad_output_all = ub_bw_obj.get_ubuf_output(1)
             grad_input, _, _ = te_gemm(
                 weight,
