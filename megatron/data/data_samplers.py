@@ -383,6 +383,7 @@ class SftConcatWithinBatchSampler:
         assert len(local_micro_batches) == len(num_samples_global_micro_batch)
         return local_micro_batches, num_samples_global_micro_batch
 
+    # pre-determine sample arrangement within minibatch and number of micro batch 
     def predetermine_within_minibatch(self):
         self.micro_batches_queue = []
         self.num_micro_batch = 0

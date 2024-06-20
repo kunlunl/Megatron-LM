@@ -38,6 +38,8 @@ from megatron.utils import check_adlr_autoresume_termination
 from megatron.utils import unwrap_model
 from megatron.data.data_samplers import build_pretraining_data_loader
 from megatron.data.data_samplers import build_sft_data_loader
+from megatron.global_vars import step_cached_num_microbatches
+
 from megatron.utils import calc_params_l2_norm
 from megatron.core.pipeline_parallel import get_forward_backward_func
 from megatron.utils import report_memory
@@ -489,7 +491,7 @@ def train_step(forward_step_func, data_iterator,
     return {}, skipped_iter, grad_norm, num_zeros_in_grad
 
 
-def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
+def training_log(loss_dict, total_loss_dict, learning_rate, iteration,num_microbatches,
                  loss_scale, report_memory_flag, skipped_iter,
                  grad_norm, params_norm, num_zeros_in_grad):
     """Log training information such as losses, timing, ...."""
@@ -557,7 +559,7 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
     # Calculate batch size.
     batch_size = args.micro_batch_size * \
         (args.data_parallel_size // args.context_parallel_size) * \
-        get_num_microbatches()
+        num_microbatches if not args.sft_concat else args.global_batch_size
 
     total_iterations = total_loss_dict[advanced_iters_key] + \
                        total_loss_dict[skipped_iters_key]
@@ -632,6 +634,8 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
 
         log_string = ' iteration {:8d}/{:8d} |'.format(
             iteration, args.train_iters)
+        log_string += ' num_microbatches: {:5d} |'.format(
+            num_microbatches)
         log_string += ' consumed samples: {:12d} |'.format(
             args.consumed_train_samples)
         log_string += ' elapsed time per iteration (ms): {:.1f} |'.format(
@@ -714,6 +718,8 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
     report_memory_flag = 2
     while iteration < args.train_iters:
         update_num_microbatches(args.consumed_train_samples)
+        if args.sft_concat:
+            step_cached_num_microbatches()
         args.curr_iteration = iteration
         if args.kaimm_gc_interval > 0:
             if iteration % args.kaimm_gc_interval == 0:
@@ -728,9 +734,12 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
                            optimizer,
                            opt_param_scheduler)
         iteration += 1
-        args.consumed_train_samples += mpu.get_data_parallel_for_sample_world_size() * \
-                                       args.micro_batch_size * \
-                                       get_num_microbatches()
+        if args.sft_concat:
+            args.consumed_train_samples += args.global_batch_size
+        else:
+            args.consumed_train_samples += mpu.get_data_parallel_for_sample_world_size() * \
+                                        args.micro_batch_size * \
+                                        get_num_microbatches()
 
         # Logging.
         loss_scale = optimizer.get_loss_scale().item()
