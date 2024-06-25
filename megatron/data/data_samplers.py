@@ -336,7 +336,20 @@ class SftConcatWithinBatchSampler:
         if isinstance(self.dataset, RandomSeedDataset):
             self.dataset.set_epoch(self.epoch)
         self.predetermine_within_minibatch()
-
+        self.total_trained_tokens = 0
+        self.total_trained_tokens_power2 = 0
+        # Sanity checks.
+        assert self.total_samples > 0, \
+            'no sample to consume: {}'.format(self.total_samples)
+        assert self.consumed_samples < self.total_samples, \
+            'no samples left to consume: {}, {}'.format(self.consumed_samples,
+                                                        self.total_samples)
+        assert self.global_batch_size > 0
+        assert data_parallel_size > 0
+        assert self.data_parallel_rank < data_parallel_size, \
+            'data_parallel_rank should be smaller than data size: {}, ' \
+            '{}'.format(self.data_parallel_rank, data_parallel_size)
+    
     def set_num_workers_times_prefech_factor(self, num_workers_times_prefech_factor):
         self.consumed_samples_backoff_queue = deque(maxlen=num_workers_times_prefech_factor)
 
