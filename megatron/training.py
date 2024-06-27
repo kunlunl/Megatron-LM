@@ -675,7 +675,38 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,num_microb
     return report_memory_flag
 
 
-def save_checkpoint_and_time(iteration, model, optimizer, opt_param_scheduler):
+
+def calculate_mfu(elapsed_time):
+    args = get_args()
+    GPU_throughput_map = {
+    "H800": 132*4*1024 * 1830e6,  # 989.4 TFLOPS
+    "A800": 108*4*512 * 1410e6,  # 311.9 TFLOPS
+    "H20": 148e12
+}
+    cluster_name = args.arch_type
+    s2 = args.iter_trained_tokens_power2
+    s1 = args.iter_trained_tokens
+
+    L = args.num_layers
+    h = args.hidden_size
+    g = args.num_attention_heads/args.num_query_groups
+    a = args.num_attention_heads
+    H = args.ffn_hidden_size 
+    V = args.padded_vocab_size
+    t = mpu.get_tensor_model_parallel_world_size()
+    c = mpu.get_context_parallel_world_size()
+    p = mpu.get_pipeline_model_parallel_world_size()
+    d = mpu.get_data_parallel_world_size()
+    T = elapsed_time
+    if args.sft_concat:
+        s2 = s2
+        s1 = s1
+        #for local packing,s2=s2/d,s1=s1/d
+        #for global packing,s2=s2,s1=s1
+    mfu = (L*h**2*((4*s1+4*s1*g/a+2*s2/h+6*H*s1/h)*3) + 6*s1*h*V)/ T / ((t*c*p*d)*GPU_throughput_map[cluster_name])
+    return mfu
+
+def save_checkpoint_and_time(iteration, model, optimizer, opt_param_scheduler, train_data_iterator):
     args = get_args()
     timers = get_timers()
     # Extra barrier is added to make sure
