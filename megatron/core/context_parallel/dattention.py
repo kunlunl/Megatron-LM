@@ -41,13 +41,53 @@ def _get_index_select_index(world_size, rank, device):
     return torch.tensor([rank * 2, 2 * world_size - 1 - 2 * rank], device=device)
 
 
-def slice_cp(x, dim, world_size, rank):
+# def slice_cp(x, dim, world_size, rank):
+#     if world_size == 1:
+#         assert rank == 0
+#         return x
+#     vx = x.view(*x.shape[:dim], world_size * 2, x.shape[dim] // world_size // 2, *x.shape[dim + 1:])
+#     output = vx.index_select(dim, _get_index_select_index(world_size, rank, vx.device))
+#     return output.view(*x.shape[:dim], x.shape[dim] // world_size, *x.shape[dim + 1:])
+def recover_packed_seq(x, dim, world_size, total_seq_len, sample_lengths=None):
+    if sample_lengths is None:
+        return x, None, None
+    sub_sample_lengths = sample_lengths.long() * x.shape[dim] // total_seq_len
+    cu_seq_lens = F.pad(sub_sample_lengths.cumsum(0), (1, 0), 'constant', 0).int().to(x.device)
+    max_seq_len = sub_sample_lengths.max().item()
+    assert cu_seq_lens[-1] == x.shape[dim], f"Expected total length of such seq to be {cu_seq_lens[-1]}, got {x.shape[dim]} instead."
+    # put segments belonging to the same sequence together
+    if len(sample_lengths) > 1:
+        vo = x.view(*x.shape[:dim], -1, total_seq_len // world_size // 2, *x.shape[dim + 1:])
+        o = torch.cat([sliced_seq.reshape(*x.shape[:dim], -1, *x.shape[dim + 1:]) for sliced_seq in vo.split((sample_lengths // world_size // 2).tolist(), dim=dim + 1)], dim=dim)
+        assert x.shape == o.shape, f"Expected output size of {x.shape}, got {o.shape}"
+        x = o
+    return x, cu_seq_lens, max_seq_len
+
+
+def slice_packed_seq(x, dim, world_size, total_seq_len, sample_lengths=None):
+    if sample_lengths is None:
+        return x
+    sub_sample_lengths = sample_lengths.long() * x.shape[dim] // total_seq_len
+    if len(sample_lengths) > 1:
+        vs_group = [seg.chunk(world_size * 2 * x.shape[dim] // total_seq_len, dim=dim) for seg in x.split(sub_sample_lengths.tolist(), dim=dim)]
+        vs_num_chunks = [len(vs) for vs in vs_group]
+        assert len(set(vs_num_chunks)), f"all sub sequences must be sliced into same number of chunk, got {vs_num_chunks}"
+        o = torch.cat([slice for vs in zip(*vs_group) for slice in vs], dim=dim)
+        assert x.shape == o.shape, f"Expected output size of {x.shape}, got {o.shape}"
+        x = o
+    return x
+
+
+def slice_cp(x, dim, world_size, rank, sample_lengths=None):
     if world_size == 1:
         assert rank == 0
         return x
-    vx = x.view(*x.shape[:dim], world_size * 2, x.shape[dim] // world_size // 2, *x.shape[dim + 1:])
-    output = vx.index_select(dim, _get_index_select_index(world_size, rank, vx.device))
-    return output.view(*x.shape[:dim], x.shape[dim] // world_size, *x.shape[dim + 1:])
+    if sample_lengths is None:
+        sample_lengths = torch.tensor([x.shape[dim]], dtype=torch.long)
+    else:
+        assert sum(sample_lengths) == x.shape[dim]
+    vs_group = [seg.chunk(world_size * 2, dim=dim) for seg in x.split(sample_lengths.tolist(), dim=dim)]
+    return torch.cat([vs[rank * 2] for vs in vs_group] + [vs[2 * world_size - 1 - 2 * rank] for vs in vs_group], dim=dim)
 
 
 def all_gather_along_dim(input, dim, group):

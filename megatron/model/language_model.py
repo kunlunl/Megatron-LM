@@ -400,7 +400,7 @@ class TransformerLanguageModel(MegatronModule):
             # partial rotary embeddings, which is better than full rotary
             # Wang and Komatsuzaki et al
             # https://github.com/kingoflolz/mesh-transformer-jax/
-            self.rotary_pos_emb = RotaryEmbedding(rotary_dim, args.use_fast_rope, args.sft_concat,
+            self.rotary_pos_emb = RotaryEmbedding(rotary_dim, args.rope_theta, args.use_fast_rope,
                                                   mpu.get_context_parallel_world_size(),
                                                   mpu.get_context_parallel_rank())
 
@@ -511,7 +511,14 @@ class TransformerLanguageModel(MegatronModule):
                 rotary_pos_emb = \
                     self.rotary_pos_emb(inference_params.max_sequence_len)
             else:
-                rotary_pos_emb = self.rotary_pos_emb(self.seq_length)
+                if encoder_input is not None:
+                    seq_len = encoder_input.shape[0] * mpu.get_context_parallel_world_size()
+                else:
+                    seq_len = self.encoder.input_tensor.shape[0] * mpu.get_context_parallel_world_size()
+                sample_lengths = None
+                if get_args().sft_concat:
+                    sample_lengths = enc_attn_mask
+                rotary_pos_emb = self.rotary_pos_emb(seq_len, sample_lengths=sample_lengths)
 
         # Run encoder.
         if enc_hidden_states is None:

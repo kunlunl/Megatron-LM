@@ -60,9 +60,9 @@ def slice_lm_inputs_along_cp(input_ids, position_ids, attention_mask, labels):
     if input_ids is None:  # no data loaded
         return input_ids, position_ids, attention_mask, labels
     CP = mpu.get_context_parallel_world_size()
+    args = get_args()
     if CP >= 2:
         # Check inputs with the same context parallel rank are equal
-        args = get_args()
         if args.curr_iteration < args.iteration + args.kaimm_warmup_iters:
             max_input_ids = input_ids.clone()
             torch.distributed.all_reduce(max_input_ids, op=torch.distributed.ReduceOp.MAX,
@@ -72,11 +72,18 @@ def slice_lm_inputs_along_cp(input_ids, position_ids, attention_mask, labels):
                                  "Please check the dataloader.")
 
         cp_rank = mpu.get_context_parallel_rank()
-        input_ids = dattention.slice_cp(input_ids, 1, CP, cp_rank)
-        position_ids = dattention.slice_cp(position_ids, 1, CP, cp_rank)
-        labels = dattention.slice_cp(labels, 1, CP, cp_rank)
+        if args.sft_concat:
+            assert attention_mask is not None
+            sample_lengths = attention_mask
+        else:
+            sample_lengths = None
+        input_ids = dattention.slice_cp(input_ids, 1, CP, cp_rank, sample_lengths=sample_lengths)
+        position_ids = dattention.slice_cp(position_ids, 1, CP, cp_rank, sample_lengths=sample_lengths)
+        labels = dattention.slice_cp(labels, 1, CP, cp_rank, sample_lengths=sample_lengths)
+
     return input_ids, position_ids, attention_mask, labels
 
 
-def gather_post_lm_output_along_cp(output):
-    return dattention.forward_gather_backward_slice(output, 1, mpu.get_context_parallel_group())
+def gather_post_lm_output_along_cp(output, total_seq_len=None, sample_lengths=None):
+    output = dattention.forward_gather_backward_slice(output, 1, mpu.get_context_parallel_group())
+    return dattention.recover_packed_seq(output, 1, mpu.get_context_parallel_world_size(), total_seq_len, sample_lengths)[0]

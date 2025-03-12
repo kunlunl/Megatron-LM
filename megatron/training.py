@@ -766,10 +766,8 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
                            optimizer,
                            opt_param_scheduler)
         iteration += 1
-        if args.sft_concat:
-            args.consumed_train_samples += args.global_batch_size
-        else:
-            args.consumed_train_samples += mpu.get_data_parallel_for_sample_world_size() * \
+        args.consumed_train_samples += args.global_batch_size if args.sft_concat else \
+                                        mpu.get_data_parallel_for_sample_world_size() * \
                                         args.micro_batch_size * \
                                         get_num_microbatches()
 

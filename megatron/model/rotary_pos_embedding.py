@@ -5,10 +5,13 @@
 # common/megatron/rotary_pos_embedding.py
 
 import functools
+import warnings
 import importlib.util
 import torch
 from torch import Tensor
+from megatron import get_args
 from megatron.core.context_parallel import dattention
+from megatron.core import mpu
 from torch import einsum, nn
 from typing import Optional
 try:
@@ -22,11 +25,13 @@ except:
 __all__ = ['RotaryEmbedding', 'apply_rotary_pos_emb']
 
 class RotaryEmbedding(nn.Module):
-    def __init__(self, dim, use_fast_rope=False, use_thd_rope=False, context_parallel_world_size=1, context_parallel_rank=0):
+    def __init__(self, dim, rope_theta=10000., use_fast_rope=False, context_parallel_world_size=1, context_parallel_rank=0):
         super().__init__()
         self.dim = dim
         self.use_fast_rope = use_fast_rope
-        self.use_thd_rope = use_thd_rope
+        self.use_thd_rope = self.use_fast_rope and get_args().sft_concat and context_parallel_world_size == 1
+        if self.use_thd_rope and self.use_fast_rope:
+            warnings.warn("Using fused_apply_rotary_pos_emb_thd instead of fast_rotary_pos_emb")
         self.context_parallel_world_size = context_parallel_world_size
         self.context_parallel_rank = context_parallel_rank
         self.register_buffer('dummy_buffer', torch.tensor(1.))
@@ -34,10 +39,14 @@ class RotaryEmbedding(nn.Module):
             raise RuntimeError("einops is required for Rotary Embedding")
         self.forward = functools.lru_cache(maxsize=1)(self.forward)
 
-    def forward(self, max_seq_len, offset=0):
-        inv_freq = 1.0 / (10000 ** (torch.arange(0, self.dim, 2, device=self.dummy_buffer.device).float() / self.dim))
-        seq = torch.arange(max_seq_len, device=inv_freq.device) + offset
-        seq = dattention.slice_cp(seq, 0, self.context_parallel_world_size, self.context_parallel_rank)
+    def forward(self, seq_len, offset=0, sample_lengths=None):
+        inv_freq = 1.0 / (self.rope_theta ** (torch.arange(0, self.dim, 2, device=self.dummy_buffer.device).float() / self.dim))
+        if sample_lengths is not None and not self.use_thd_rope:
+            assert sum(sample_lengths) == seq_len
+            seq = torch.cat([torch.arange(sample_length, device=inv_freq.device) for sample_length in sample_lengths]) + offset
+        else:
+            seq = torch.arange(seq_len, device=inv_freq.device) + offset
+        seq = dattention.slice_cp(seq, 0, self.context_parallel_world_size, self.context_parallel_rank, sample_lengths=sample_lengths)
         freqs = einsum('i , j -> i j', seq.type_as(inv_freq), inv_freq)
         # first part even vector components, second part odd vector components,
         #  2 * dim in dimension size
@@ -56,6 +65,9 @@ class FastRotaryPosEmbFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, t, freqs, precompute_sin_cos):
         import fast_rotary_pos_emb
+        seq_length = t.shape[0]
+        assert freqs.shape[0] == seq_length, \
+            f"due to flip mechanism of context parallel impl, sequence length of freqs: {freqs.shape[0]} must match that of t: {seq_length}."
         output = fast_rotary_pos_emb.forward(t, freqs, precompute_sin_cos)
         ctx.save_for_backward(freqs)
         ctx.precompute_sin_cos = precompute_sin_cos
@@ -124,15 +136,16 @@ def apply_rotary_pos_emb(
     Reroute to the appropriate apply_rotary_pos_emb function depending on
     fused/unfused kernels, or bshd (conventional) / thd (packed seq) format
     """
+    # return t.contiguous()
 
     if use_fast_rope:
-        if cu_seqlens is None:
+        if cu_seqlens is None or mpu.get_context_parallel_world_size() > 1:
             return FastRotaryPosEmbFunction.apply(t, freqs, True)
         else:
-            t = t.squeeze(1) 
-            return fused_apply_rotary_pos_emb_thd(t, cu_seqlens, freqs).transpose(0, 1) 
+            t = t.squeeze(1)
+            return fused_apply_rotary_pos_emb_thd(t, cu_seqlens, freqs).unsqueeze(1)
     else:
-        if cu_seqlens is None:
+        if cu_seqlens is None or mpu.get_context_parallel_world_size() > 1:
             return apply_rotary_pos_emb_bshd(t, freqs)
         else:
             return apply_rotary_pos_emb_thd(t, cu_seqlens, freqs)

@@ -476,8 +476,32 @@ class FlashSelfAttention(torch.nn.Module):
                     tp_rank=tp_rank,
                     tp_world_size=tp_world_size
                 )
-            output = rearrange(output, '(b s) ... -> b s ...', b=batch_size)
-            return output
+        elif self.sft_concat:
+            assert seqlen_k == seqlen_q, f"got k of {seqlen_k} and q of {seqlen_q}"
+            seqlen_q = attention_mask.max().item()
+            seqlen_k = seqlen_q
+            cu_seqlens_q = F.pad(attention_mask.cumsum(0), (1, 0), 'constant', 0).int().to(q.device)
+            q, k, v = [x.squeeze(0) for x in [q, k, v]]
+            cu_seqlens_k = cu_seqlens_q
+            output = self.flash_attn_unpadded_func(
+                q, k, v, cu_seqlens_q, cu_seqlens_k, seqlen_q, seqlen_k,
+                self.dropout_p,
+                softmax_scale=self.softmax_scale, causal=is_causal,
+                **extra_args
+            )
+            output = output.unsqueeze(0)
+        elif self.sft_padding:
+            assert seqlen_k == seqlen_q, f"got k of {seqlen_k} and q of {seqlen_q}"
+            q_unpad, indices, cu_seqlens_q, max_s = unpad_input(q, attention_mask)
+            k_unpad, _, cu_seqlens_k, _ = unpad_input(k, attention_mask)
+            v_unpad, _, cu_seqlens_v, _ = unpad_input(v, attention_mask)
+            output_unpad = self.flash_attn_unpadded_func(
+                q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, seqlen_q, seqlen_k,
+                self.dropout_p,
+                softmax_scale=self.softmax_scale, causal=is_causal,
+                **extra_args
+            )
+            output = pad_input(output_unpad, indices, batch_size, seqlen_q)
         else:
             extra_args = {
                 'alibi_bias_max': self.alibi_bias_max,
@@ -818,7 +842,7 @@ class ParallelAttention(MegatronModule):
                 cu_seqlens_kv = cu_seqlens_q
             else:
                 cu_seqlens_q = cu_seqlens_kv = None
-            query_layer = apply_rotary_pos_emb(query_layer, q_pos_emb, cu_seqlens_q,self.use_fast_rope)
+            query_layer = apply_rotary_pos_emb(query_layer, q_pos_emb, cu_seqlens_q, self.use_fast_rope)
             if not self.cp_overlap:
                 key_layer = apply_rotary_pos_emb(key_layer, k_pos_emb, cu_seqlens_kv, self.use_fast_rope)
                 value_layer = value_layer.contiguous()
