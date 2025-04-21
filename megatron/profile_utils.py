@@ -175,7 +175,7 @@ def perf_model_summary():
         torch.distributed.all_reduce(time_list, op=torch.distributed.ReduceOp.SUM, group=mpu.get_tensor_model_parallel_group())
         torch.distributed.all_reduce(time_list, op=torch.distributed.ReduceOp.SUM, group=mpu.get_context_parallel_group()) # TODO(kunlunl): What's the correct context_parallel_group here?
         torch.distributed.all_reduce(time_list, op=torch.distributed.ReduceOp.MAX, group=mpu.get_data_parallel_group())
-        time_dict[name, fb] = time_list.item() / (mpu.get_tensor_model_parallel_world_size() * mpu.get_context_parallel_world_size())
+        time_dict[name, fb] = time_list.item() / (mpu.get_tensor_model_parallel_world_size() * mpu.get_context_parallel_world_size()) # TODO(kunlunl): What's the correct cp_size here?
     if mpu.get_context_parallel_rank() == 0 and mpu.get_tensor_model_parallel_rank() == 0 and mpu.get_data_parallel_rank() == 0:
         args = get_args()
         line = f"{args.hidden_size} {args.ffn_hidden_size} {args.num_attention_heads} " + \

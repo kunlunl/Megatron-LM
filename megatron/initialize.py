@@ -275,7 +275,7 @@ def _warmup_jit_function():
     # Warmup fused bias+gelu
     bias = torch.rand(args.ffn_hidden_size // args.tensor_model_parallel_size,
                       dtype=dtype, device='cuda')
-    input = torch.rand((args.seq_length // mpu.get_context_parallel_world_size(), args.micro_batch_size,
+    input = torch.rand((args.seq_length // mpu.get_context_parallel_world_size(), args.micro_batch_size, #TODO(kunlunl): This is not correct?
                         args.ffn_hidden_size // args.tensor_model_parallel_size),
                        dtype=dtype, device='cuda')
     # Warmup JIT fusions with the input grad_enable state of both forward
@@ -293,7 +293,7 @@ def _warmup_jit_function():
         seq_length = args.seq_length // mpu.get_tensor_model_parallel_world_size()
     else:
         seq_length = args.seq_length
-    seq_length //= mpu.get_context_parallel_world_size()
+    seq_length //= mpu.get_context_parallel_world_size() #TODO(kunlunl): This is not correct?
     input = torch.rand((seq_length, args.micro_batch_size, args.hidden_size),
                        dtype=dtype, device='cuda')
     residual = torch.rand((seq_length, args.micro_batch_size, args.hidden_size),

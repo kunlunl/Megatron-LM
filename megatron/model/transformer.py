@@ -520,7 +520,7 @@ class ParallelAttention(MegatronModule):
                 **_args_to_kwargs())
         else:
             assert attention_type == AttnType.cross_attn
-            assert mpu.get_context_parallel_world_size() == 1, "context parallel does not support cross attention"
+            assert mpu.get_context_parallel_world_size() == 1, "context parallel does not support cross attention" # TODO(kunlunl): Check if it's correct
 
             if self.group_query_attention:
                 raise NotImplementedError("Grouped query attention not implemented for cross-attention.")
@@ -877,7 +877,7 @@ class ParallelTransformerLayer(MegatronModule):
         self.ub_o_bw_obj   = None
         self.ub_fc2_bw_obj = None
         cp_world_size = mpu.get_context_parallel_world_size()
-        hidden_dims = [args.seq_length * args.micro_batch_size // cp_world_size, args.hidden_size]
+        hidden_dims = [args.seq_length * args.micro_batch_size // cp_world_size, args.hidden_size] # TODO(kunlunl): This is not correct
         if args.overlap_sp_ag:
             self.ub_qkv_fw_obj = mpu.get_global_te_user_buffer("kaimm_gemm", hidden_dims, args.params_dtype, True)
 
