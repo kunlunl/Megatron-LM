@@ -1013,7 +1013,7 @@ class ColumnParallelLinear(torch.nn.Module):
         else:
             input_parallel = copy_to_tensor_model_parallel_region(input_)
         # Matrix multiply.
-        if self.cp_overlap:
+        if self.cp_overlap and get_context_parallel_world_size() >= 2:
             output_parallel = linear_qkv_with_grad_accumulation_and_async_allreduce(
                 input=input_parallel,
                 weight=self.weight,

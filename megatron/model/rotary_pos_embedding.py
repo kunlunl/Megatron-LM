@@ -14,21 +14,19 @@ from torch import einsum, nn
 __all__ = ['RotaryEmbedding', 'apply_rotary_pos_emb']
 
 class RotaryEmbedding(nn.Module):
-    def __init__(self, dim, use_fast_rope=False, context_parallel_world_size=1, context_parallel_rank=0):
+    def __init__(self, dim, use_fast_rope=False):
         super().__init__()
         self.dim = dim
         self.use_fast_rope = use_fast_rope
-        self.context_parallel_world_size = context_parallel_world_size
-        self.context_parallel_rank = context_parallel_rank
         self.register_buffer('dummy_buffer', torch.tensor(1.))
         if importlib.util.find_spec('einops') is None:
             raise RuntimeError("einops is required for Rotary Embedding")
         self.forward = functools.lru_cache(maxsize=1)(self.forward)
 
-    def forward(self, max_seq_len, offset=0):
+    def forward(self, max_seq_len, offset=0, context_parallel_world_size=1, context_parallel_rank=0):
         inv_freq = 1.0 / (10000 ** (torch.arange(0, self.dim, 2, device=self.dummy_buffer.device).float() / self.dim))
         seq = torch.arange(max_seq_len, device=inv_freq.device) + offset
-        seq = dattention.slice_cp(seq, 0, self.context_parallel_world_size, self.context_parallel_rank)
+        seq = dattention.slice_cp(seq, 0, context_parallel_world_size, context_parallel_rank)
         freqs = einsum('i , j -> i j', seq.type_as(inv_freq), inv_freq)
         # first part even vector components, second part odd vector components,
         #  2 * dim in dimension size

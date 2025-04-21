@@ -460,8 +460,8 @@ class ParallelAttention(MegatronModule):
         self.attn_mask_type = attn_mask_type
         self.params_dtype = args.params_dtype
         self.sequence_parallel = args.sequence_parallel
-        self.cp_overlap = args.context_parallel_comm_overlap_gemm and mpu.get_context_parallel_world_size() >= 2
-        self.cp_offload_mode = args.kaimm_cp_offload_mode
+        self.cp_overlap = args.context_parallel_comm_overlap_gemm # TODO(kunlunl): Is this correct?
+        self.cp_offload_mode = args.kaimm_cp_offload_mode # TODO(kunlunl): Don't need to handle this?
         self.use_fast_rope = args.use_fast_rope
         assert not self.cp_overlap or not args.use_rotary_position_embeddings or self.use_fast_rope, "CP overlap requries using fast rope"
 
@@ -548,7 +548,7 @@ class ParallelAttention(MegatronModule):
                                             self.attn_mask_type)
         self.checkpoint_core_attention = args.recompute_granularity == 'selective'
 
-        if self.use_flash_attn and not self.cp_overlap:
+        if self.use_flash_attn:
             self.core_attention_flash = FlashSelfAttention(
                 causal=True, attention_dropout=args.attention_dropout
             )
@@ -629,7 +629,7 @@ class ParallelAttention(MegatronModule):
         # =====================
         if self.attention_type == AttnType.self_attn:
             # Attention heads [sq, b, h] --> [sq, b, ng * (np/ng + 2) * hn)]
-            if self.cp_overlap:
+            if self.cp_overlap and mpu.get_context_parallel_world_size() >= 2:
                 if self.cp_offload_mode != 0:
                     offload.wait_offload_stream()  # wait for the last memcpyDtoH KV to finish
                 if isinstance(rotary_pos_emb, tuple):
@@ -735,7 +735,7 @@ class ParallelAttention(MegatronModule):
         if rotary_pos_emb is not None:
             q_pos_emb, k_pos_emb = rotary_pos_emb
             query_layer = apply_rotary_pos_emb(query_layer, q_pos_emb, self.use_fast_rope)
-            if not self.cp_overlap:
+            if not self.cp_overlap or mpu.get_context_parallel_world_size() == 1:
                 key_layer = apply_rotary_pos_emb(key_layer, k_pos_emb, self.use_fast_rope)
             # TODO, can apply positional embedding to value_layer so it has
             # absolute positional embedding.
@@ -758,7 +758,7 @@ class ParallelAttention(MegatronModule):
                 context_layer = self.core_attention(
                     query_layer, key_layer, value_layer, attention_mask)
         else:
-            if self.cp_overlap:
+            if self.cp_overlap and mpu.get_context_parallel_world_size() >= 2:
                 qi = query_layer.transpose(0, 1)
                 tp_world_size = mpu.get_tensor_model_parallel_world_size()
                 tp_rank = mpu.get_tensor_model_parallel_rank()

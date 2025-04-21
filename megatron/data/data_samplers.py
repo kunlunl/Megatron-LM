@@ -24,16 +24,16 @@ def build_pretraining_data_loader(dataset, consumed_samples):
             total_samples=len(dataset),
             consumed_samples=consumed_samples,
             micro_batch_size=args.micro_batch_size,
-            data_parallel_rank=mpu.get_data_parallel_for_sample_rank(),
-            data_parallel_size=mpu.get_data_parallel_for_sample_world_size())
+            data_parallel_rank=mpu.get_data_parallel_for_sample_rank(), # TODO(kunlunl): We need dataloader to determine the context parallel size?
+            data_parallel_size=mpu.get_data_parallel_for_sample_world_size()) # TODO(kunlunl): We need dataloader to determine the context parallel size?
     elif args.dataloader_type == 'cyclic':
         batch_sampler = MegatronPretrainingRandomSampler(
             dataset,
             total_samples=len(dataset),
             consumed_samples=consumed_samples,
             micro_batch_size=args.micro_batch_size,
-            data_parallel_rank=mpu.get_data_parallel_for_sample_rank(),
-            data_parallel_size=mpu.get_data_parallel_for_sample_world_size(),
+            data_parallel_rank=mpu.get_data_parallel_for_sample_rank(), # TODO(kunlunl): We need dataloader to determine the context parallel size?
+            data_parallel_size=mpu.get_data_parallel_for_sample_world_size(), # TODO(kunlunl): We need dataloader to determine the context parallel size?
             data_sharding=args.data_sharding)
     else:
         raise Exception('{} dataloader type is not supported.'.format(

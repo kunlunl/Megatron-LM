@@ -426,7 +426,11 @@ def train_step(forward_step_func, data_iterator,
         model=model,
         num_microbatches=get_num_microbatches(),
         dtype=args.params_dtype,
-        tensor_shape=(args.seq_length // args.context_parallel_size, args.micro_batch_size, args.hidden_size),
+        tensor_shape=(
+            args.seq_length // mpu.get_context_parallel_world_size(),
+            args.micro_batch_size,
+            args.hidden_size,
+        ),
         grad_scaler=optimizer.scale_loss,
         sequence_parallel=args.sequence_parallel,
         overlap_p2p_comm=args.overlap_p2p_comm,
@@ -468,7 +472,7 @@ def train_step(forward_step_func, data_iterator,
         increment = get_num_microbatches() * \
                     args.micro_batch_size * \
                     args.data_parallel_size // \
-                    args.context_parallel_size
+                    mpu.get_context_parallel_world_size()
         opt_param_scheduler.step(increment=increment)
         skipped_iter = 0
     else:
@@ -555,7 +559,7 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
 
     # Calculate batch size.
     batch_size = args.micro_batch_size * \
-        (args.data_parallel_size // args.context_parallel_size) * \
+        (args.data_parallel_size // mpu.get_context_parallel_world_size()) * \
         get_num_microbatches()
 
     total_iterations = total_loss_dict[advanced_iters_key] + \

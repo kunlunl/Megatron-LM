@@ -293,7 +293,7 @@ class MegatronOptimizer(ABC):
                 model.allreduce_gradients()
             timers('grads-all-reduce').stop()
         else:
-            assert args.context_parallel_size == 1, "need reduce_sum along CP group"
+            assert mpu.get_context_parallel_world_size() == 1, "need reduce_sum along CP group"
 
         # All-reduce embedding grads.
         timers('embedding-grads-all-reduce', log_level=1).start(

@@ -173,14 +173,14 @@ def perf_model_summary():
     for (name, fb), time_list in sorted(m.items()):
         time_list = torch.tensor(time_list[len(time_list) // 2:], dtype=torch.float32, device="cuda").mean()
         torch.distributed.all_reduce(time_list, op=torch.distributed.ReduceOp.SUM, group=mpu.get_tensor_model_parallel_group())
-        torch.distributed.all_reduce(time_list, op=torch.distributed.ReduceOp.SUM, group=mpu.get_context_parallel_group())
+        torch.distributed.all_reduce(time_list, op=torch.distributed.ReduceOp.SUM, group=mpu.get_context_parallel_group()) # TODO(kunlunl): What's the correct context_parallel_group here?
         torch.distributed.all_reduce(time_list, op=torch.distributed.ReduceOp.MAX, group=mpu.get_data_parallel_group())
         time_dict[name, fb] = time_list.item() / (mpu.get_tensor_model_parallel_world_size() * mpu.get_context_parallel_world_size())
     if mpu.get_context_parallel_rank() == 0 and mpu.get_tensor_model_parallel_rank() == 0 and mpu.get_data_parallel_rank() == 0:
         args = get_args()
         line = f"{args.hidden_size} {args.ffn_hidden_size} {args.num_attention_heads} " + \
             f"{args.group_query_attention} {args.num_query_groups} {args.num_layers} {args.seq_length} " + \
-            f"{args.tensor_model_parallel_size} {args.context_parallel_size} {args.kaimm_overlap_cp_slow_ctas}"
+            f"{args.tensor_model_parallel_size} {args.context_parallel_size} {args.kaimm_overlap_cp_slow_ctas}" # TODO(kunlunl): Change args.context_parallel_size to a runtime variable?
         for name in ["emb", "L", "post"]:
             print(f"{name} {time_dict[name, 'forward']:.3f}+{time_dict[name, 'backward']:.3f}", end="    ")
             line += f" {name} {time_dict[name, 'forward']} {time_dict[name, 'backward']}"

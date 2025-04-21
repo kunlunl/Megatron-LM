@@ -35,6 +35,15 @@ def get_batch(data_iterator):
     args = get_args()
     tokenizer = get_tokenizer()
 
+    # TODO(kunlunl): Remove this
+    cp_size = mpu.get_context_parallel_world_size()
+    dp_size = mpu.get_data_parallel_world_size()
+    cp_size *= 2
+    if cp_size > dp_size:
+        cp_size = 1
+    mpu.set_context_parallel_world_size(cp_size)
+    print(f"cp_size: {cp_size}")
+
     pp_rank = mpu.get_pipeline_model_parallel_rank()
     v_rank = mpu.get_virtual_pipeline_model_parallel_rank()
     if v_rank is not None and not (pp_rank == 0 and v_rank == 0) and \
