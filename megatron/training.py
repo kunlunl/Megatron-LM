@@ -429,7 +429,11 @@ def train_step(forward_step_func, data_iterator,
         model=model,
         num_microbatches=get_num_microbatches(),
         dtype=args.params_dtype,
-        tensor_shape=(args.seq_length // args.context_parallel_size, args.micro_batch_size, args.hidden_size),
+        tensor_shape=(
+            args.seq_length // mpu.get_context_parallel_world_size(),
+            args.micro_batch_size,
+            args.hidden_size,
+        ),
         grad_scaler=optimizer.scale_loss,
         sequence_parallel=args.sequence_parallel,
         overlap_p2p_comm=args.overlap_p2p_comm,
@@ -472,7 +476,7 @@ def train_step(forward_step_func, data_iterator,
                     get_num_microbatches() * \
                     args.micro_batch_size * \
                     args.data_parallel_size // \
-                    args.context_parallel_size
+                    mpu.get_context_parallel_world_size()
         opt_param_scheduler.step(increment=increment)
         skipped_iter = 0
     else:
@@ -559,7 +563,7 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,num_microb
 
     # Calculate batch size.
     batch_size = args.micro_batch_size * \
-        (args.data_parallel_size // args.context_parallel_size) * \
+        (args.data_parallel_size // mpu.get_context_parallel_world_size()) * \
         num_microbatches if not args.sft_concat else args.global_batch_size
 
     total_iterations = total_loss_dict[advanced_iters_key] + \
@@ -749,6 +753,13 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
     print_datetime('before the start of training step')
     report_memory_flag = 2
     while iteration < args.train_iters:
+
+        # TODO(kunlunl): Remove this
+        possible_cp_size = mpu.get_context_parallel_all_possible_world_sizes()
+        cp_size = possible_cp_size[iteration % len(possible_cp_size)]
+        print(f"Set cp_size to {cp_size}")
+        mpu.set_context_parallel_world_size(cp_size)
+
         update_num_microbatches(args.consumed_train_samples)
         if args.sft_concat:
             step_cached_num_microbatches()

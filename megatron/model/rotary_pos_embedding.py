@@ -26,17 +26,13 @@ except:
 __all__ = ['RotaryEmbedding', 'apply_rotary_pos_emb']
 
 class RotaryEmbedding(nn.Module):
-    def __init__(self, dim, rope_theta=10000., use_fast_rope=False, context_parallel_world_size=1, context_parallel_rank=0):
+    def __init__(self, dim, rope_theta=10000., use_fast_rope=False):
         super().__init__()
         args = get_args()
         self.dim = dim
         self.rope_theta = rope_theta
         self.use_fast_rope = use_fast_rope
-        self.use_thd_rope = args.sft_concat and context_parallel_world_size == 1 and HAVE_APPLY_ROPE_FUSION
-        if self.use_thd_rope and self.use_fast_rope:
-            warnings.warn("Using fused_apply_rotary_pos_emb_thd instead of fast_rotary_pos_emb")
-        self.context_parallel_world_size = context_parallel_world_size
-        self.context_parallel_rank = context_parallel_rank
+        self.sft_concat = args.sft_concat
         self.register_buffer('dummy_buffer', torch.tensor(1.))
         if importlib.util.find_spec('einops') is None:
             raise RuntimeError("einops is required for Rotary Embedding")
@@ -45,7 +41,7 @@ class RotaryEmbedding(nn.Module):
         if not args.variable_seq_lengths:
             self.forward = functools.lru_cache(maxsize=1)(self.forward)
 
-    def get_freqs(self, max_seq_len, offset=0):
+    def get_freqs(self, max_seq_len, use_thd_rope, offset=0):
         inv_freq = 1.0 / (self.rope_theta ** (torch.arange(0, self.dim, 2, device=self.dummy_buffer.device).float() / self.dim))
         seq = torch.arange(max_seq_len, device=inv_freq.device) + offset
         freqs = einsum('i , j -> i j', seq.type_as(inv_freq), inv_freq)
@@ -55,21 +51,24 @@ class RotaryEmbedding(nn.Module):
         # emb [seq_length, .., dim]
         from einops import rearrange
         freqs = rearrange(emb, 'n d -> n 1 1 d')
-        if (not self.use_thd_rope) and self.use_fast_rope:
+        if (not use_thd_rope) and self.use_fast_rope:
             freqs_sin_cos = torch.cat([freqs.sin()[..., None], freqs.cos()[..., None]], dim=-1).reshape(*freqs.shape[:-1], -1)
             return freqs_sin_cos.type_as(self.dummy_buffer)
         # Note(yuantailing): Store freqs (before sin/cos) in fp32 to match fast rope precision
         return freqs
 
-    def forward(self, seq_len, offset=0, packing_info=None):
+    def forward(self, seq_len, offset=0, packing_info=None, context_parallel_world_size=1, context_parallel_rank=0):
         # in case of padding
         self.max_seq_length = max(self.max_seq_length, seq_len)
-        max_seq_len_freqs = self.get_freqs(self.max_seq_length, offset=offset)
-        if packing_info is not None and not self.use_thd_rope:
+        use_thd_rope = self.sft_concat and context_parallel_world_size == 1 and HAVE_APPLY_ROPE_FUSION
+        if use_thd_rope and self.use_fast_rope:
+            warnings.warn("Using fused_apply_rotary_pos_emb_thd instead of fast_rotary_pos_emb")
+        max_seq_len_freqs = self.get_freqs(self.max_seq_length, use_thd_rope, offset=offset)
+        if packing_info is not None and not use_thd_rope:
             freqs = torch.cat([max_seq_len_freqs[:sample_length] for sample_length in packing_info["sample_lengths"].tolist()], dim=0)
         else:
             freqs = max_seq_len_freqs[:seq_len]
-        freqs = dattention.slice_cp(freqs, 0, self.context_parallel_world_size, self.context_parallel_rank, packing_info=packing_info)
+        freqs = dattention.slice_cp(freqs, 0, context_parallel_world_size, context_parallel_rank, packing_info=packing_info)
         # Note(lizhouyang): Wrap freqs in Parameter to prevent it from being offloaded.
         return torch.nn.Parameter(freqs)
 

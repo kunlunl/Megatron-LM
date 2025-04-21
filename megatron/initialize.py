@@ -272,43 +272,48 @@ def _warmup_jit_function():
     else:
         dtype = torch.float32
 
-    # Warmup fused bias+gelu
-    bias = torch.rand(args.ffn_hidden_size // args.tensor_model_parallel_size,
-                      dtype=dtype, device='cuda')
-    input = torch.rand((args.seq_length // mpu.get_context_parallel_world_size(), args.micro_batch_size,
-                        args.ffn_hidden_size // args.tensor_model_parallel_size),
-                       dtype=dtype, device='cuda')
-    # Warmup JIT fusions with the input grad_enable state of both forward
-    # prop and recomputation
-    for bias_grad, input_grad in zip([True, True], [False, True]):
-        bias.requires_grad, input.requires_grad = bias_grad, input_grad
-        for _ in range(5):
-            output = None
-            if args.bias_gelu_fusion:
-                output = bias_gelu(bias, input)
-    del bias, input, output
-
-    # Warmup fused bias+dropout+add
-    if args.sequence_parallel:
-        seq_length = args.seq_length // mpu.get_tensor_model_parallel_world_size()
-    else:
-        seq_length = args.seq_length
-    seq_length //= mpu.get_context_parallel_world_size()
-    input = torch.rand((seq_length, args.micro_batch_size, args.hidden_size),
-                       dtype=dtype, device='cuda')
-    residual = torch.rand((seq_length, args.micro_batch_size, args.hidden_size),
+    def _warmup_jit_function_with_cp_size(cp_size):
+        # Warmup fused bias+gelu
+        bias = torch.rand(args.ffn_hidden_size // args.tensor_model_parallel_size,
                           dtype=dtype, device='cuda')
-    bias = torch.rand((args.hidden_size), dtype=dtype, device='cuda').expand_as(residual)
-    dropout_rate = 0.1
-    # Warmup JIT fusions with the input grad_enable state of both forward
-    # prop and recomputation
-    for input_grad, bias_grad, residual_grad in zip([False, True], [True, True], [True, True]):
-        input.requires_grad = input_grad
-        bias.requires_grad = bias_grad
-        residual.requires_grad = residual_grad
-        for _ in range(5):
-            output = None
-            if args.bias_dropout_fusion:
-                output = bias_dropout_add_fused_train(input, bias, residual, dropout_rate)
-    del bias, input, residual, output
+        inputs = torch.rand((args.seq_length // cp_size, args.micro_batch_size,
+                            args.ffn_hidden_size // args.tensor_model_parallel_size),
+                            dtype=dtype, device='cuda')
+        # Warmup JIT fusions with the input grad_enable state of both forward
+        # prop and recomputation
+        for bias_grad, inputs_grad in zip([True, True], [False, True]):
+            bias.requires_grad, inputs.requires_grad = bias_grad, inputs_grad
+            for _ in range(5):
+                output = None
+                if args.bias_gelu_fusion:
+                    output = bias_gelu(bias, inputs)
+        del bias, inputs, output
+
+        # Warmup fused bias+dropout+add
+        if args.sequence_parallel:
+            seq_length = args.seq_length // mpu.get_tensor_model_parallel_world_size()
+        else:
+            seq_length = args.seq_length
+        seq_length //= cp_size
+        inputs = torch.rand((seq_length, args.micro_batch_size, args.hidden_size),
+                             dtype=dtype, device='cuda')
+        residual = torch.rand((seq_length, args.micro_batch_size, args.hidden_size),
+                               dtype=dtype, device='cuda')
+        bias = torch.rand((args.hidden_size), dtype=dtype, device='cuda').expand_as(residual)
+        dropout_rate = 0.1
+        # Warmup JIT fusions with the input grad_enable state of both forward
+        # prop and recomputation
+        for inputs_grad, bias_grad, residual_grad in zip([False, True], [True, True], [True, True]):
+            inputs.requires_grad = inputs_grad
+            bias.requires_grad = bias_grad
+            residual.requires_grad = residual_grad
+            for _ in range(5):
+                output = None
+                if args.bias_dropout_fusion:
+                    output = bias_dropout_add_fused_train(inputs, bias, residual, dropout_rate)
+        del bias, inputs, residual, output
+
+    # Warmup JIT fusions for all possible context parallel sizes
+    for cp_size in mpu.get_context_parallel_all_possible_world_sizes():
+        _warmup_jit_function_with_cp_size(cp_size)
     torch.cuda.empty_cache()

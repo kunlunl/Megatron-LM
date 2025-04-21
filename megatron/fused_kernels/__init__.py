@@ -94,7 +94,8 @@ def load(args):
     # Context parallel.
     # =================
 
-    if args.context_parallel_size >= 2 or args.kaimm_offload_activation_ratio > 0:
+    # TODO(kunlunl): Make it always be True?
+    if True:
         extra_cuda_flags = []
 
         # Fast flip

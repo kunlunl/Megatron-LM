@@ -113,9 +113,9 @@ class ParallelMLP(MegatronModule):
     """
 
     def __init__(self, init_method, output_layer_init_method, 
-                 ub_fc1_fw_obj = None, 
-                 ub_fc2_fw_obj = None, 
-                 ub_fc2_bw_obj = None,
+                 ub_fc1_fw_args = None, 
+                 ub_fc2_fw_args = None, 
+                 ub_fc2_bw_args = None,
                  recompute_mlp_activation_func=False):
         super(ParallelMLP, self).__init__()
         args = get_args()
@@ -130,7 +130,7 @@ class ParallelMLP(MegatronModule):
             gather_output=False,
             init_method=init_method,
             skip_bias_add=True,
-            ub_obj=ub_fc1_fw_obj,
+            ub_args=ub_fc1_fw_args,
             async_tensor_model_parallel_allreduce=args.async_tensor_model_parallel_allreduce,
             **_args_to_kwargs())
 
@@ -163,8 +163,8 @@ class ParallelMLP(MegatronModule):
             input_is_parallel=True,
             init_method=output_layer_init_method,
             skip_bias_add=True,
-            ub_fw_obj=ub_fc2_fw_obj,
-            ub_bw_obj=ub_fc2_bw_obj,
+            ub_fw_args=ub_fc2_fw_args,
+            ub_bw_args=ub_fc2_bw_args,
             **_args_to_kwargs())
 
         self.recompute_mlp_activation_func = recompute_mlp_activation_func
@@ -523,9 +523,9 @@ class ParallelAttention(MegatronModule):
                  output_layer_init_method, layer_number,
                  attention_type=AttnType.self_attn,
                  attn_mask_type=AttnMaskType.padding, 
-                 ub_qkv_fw_obj = None, 
-                 ub_o_fw_obj = None, 
-                 ub_o_bw_obj = None):
+                 ub_qkv_fw_args = None, 
+                 ub_o_fw_args = None, 
+                 ub_o_bw_args = None):
         super(ParallelAttention, self).__init__()
         args = get_args()
         self.layer_number = max(1, layer_number)
@@ -533,8 +533,8 @@ class ParallelAttention(MegatronModule):
         self.attn_mask_type = attn_mask_type
         self.params_dtype = args.params_dtype
         self.sequence_parallel = args.sequence_parallel
-        self.cp_overlap = args.context_parallel_comm_overlap_gemm and mpu.get_context_parallel_world_size() >= 2
-        self.cp_offload_mode = args.kaimm_cp_offload_mode
+        self.cp_overlap = args.context_parallel_comm_overlap_gemm # TODO(kunlunl): Is this correct?
+        self.cp_offload_mode = args.kaimm_cp_offload_mode # TODO(kunlunl): Don't need to handle this?
         self.use_fast_rope = args.use_fast_rope
         self.sft_padding = args.sft_padding
         self.sft_concat = args.sft_concat
@@ -590,12 +590,12 @@ class ParallelAttention(MegatronModule):
                 init_method=init_method,
                 async_tensor_model_parallel_allreduce=args.async_tensor_model_parallel_allreduce,
                 cp_overlap=self.cp_overlap,
-                ub_obj=ub_qkv_fw_obj,
+                ub_args=ub_qkv_fw_args,
                 hidden_size_per_attention_head=self.hidden_size_per_attention_head,
                 **_args_to_kwargs())
         else:
             assert attention_type == AttnType.cross_attn
-            assert mpu.get_context_parallel_world_size() == 1, "context parallel does not support cross attention"
+            assert mpu.get_context_parallel_world_size() == 1, "context parallel does not support cross attention" # TODO(kunlunl): Check if it's correct
 
             if self.group_query_attention:
                 raise NotImplementedError("Grouped query attention not implemented for cross-attention.")
@@ -623,7 +623,7 @@ class ParallelAttention(MegatronModule):
                                             self.attn_mask_type)
         self.checkpoint_core_attention = args.recompute_granularity == 'selective'
 
-        if self.use_flash_attn and not self.cp_overlap:
+        if self.use_flash_attn:
             self.core_attention_flash = FlashSelfAttention(
                 causal=True, attention_dropout=args.attention_dropout, alibi_bias_max=args.alibi_bias_max
             )
@@ -636,8 +636,8 @@ class ParallelAttention(MegatronModule):
             input_is_parallel=True,
             init_method=output_layer_init_method,
             skip_bias_add=True,
-            ub_fw_obj=ub_o_fw_obj,
-            ub_bw_obj=ub_o_bw_obj,
+            ub_fw_args=ub_o_fw_args,
+            ub_bw_args=ub_o_bw_args,
             **_args_to_kwargs())
 
     def _checkpointed_attention_forward(self, query_layer, key_layer,
@@ -704,7 +704,7 @@ class ParallelAttention(MegatronModule):
         # =====================
         if self.attention_type == AttnType.self_attn:
             # Attention heads [sq, b, h] --> [sq, b, ng * (np/ng + 2) * hn)]
-            if self.cp_overlap:
+            if self.cp_overlap and mpu.get_context_parallel_world_size() >= 2:
                 if self.cp_offload_mode != 0:
                     offload.wait_offload_stream()  # wait for the last memcpyDtoH KV to finish
                 if isinstance(rotary_pos_emb, tuple):
@@ -815,7 +815,7 @@ class ParallelAttention(MegatronModule):
             else:
                 cu_seqlens_q = cu_seqlens_kv = None
             query_layer = apply_rotary_pos_emb(query_layer, q_pos_emb, cu_seqlens_q, self.use_fast_rope)
-            if not self.cp_overlap:
+            if not self.cp_overlap or mpu.get_context_parallel_world_size() < 2:
                 key_layer = apply_rotary_pos_emb(key_layer, k_pos_emb, cu_seqlens_kv, self.use_fast_rope)
                 value_layer = value_layer.contiguous()
             # TODO, can apply positional embedding to value_layer so it has
@@ -841,7 +841,7 @@ class ParallelAttention(MegatronModule):
         else:
             if not self.sft_padding:
                 attention_mask = None
-            if self.cp_overlap:                    
+            if self.cp_overlap and mpu.get_context_parallel_world_size() >= 2:
                 qi = query_layer.transpose(0, 1)
                 tp_world_size = mpu.get_tensor_model_parallel_world_size()
                 tp_rank = mpu.get_tensor_model_parallel_rank()
@@ -953,27 +953,22 @@ class ParallelTransformerLayer(MegatronModule):
                 sequence_parallel=args.sequence_parallel,
                 apply_layernorm_1p=args.apply_layernorm_1p)
 
-        self.ub_qkv_fw_obj = None
-        self.ub_o_fw_obj   = None
-        self.ub_fc1_fw_obj = None
-        self.ub_fc2_fw_obj = None
-        self.ub_o_bw_obj   = None
-        self.ub_fc2_bw_obj = None
-        cp_world_size = mpu.get_context_parallel_world_size()
-        hidden_dims = [args.seq_length * args.micro_batch_size // cp_world_size, args.hidden_size]
+        ub_qkv_fw_args = None
+        ub_o_fw_args   = None
+        ub_fc1_fw_args = None
+        ub_fc2_fw_args = None
+        ub_o_bw_args   = None
+        ub_fc2_bw_args = None
+        ub_shape = (args.seq_length * args.micro_batch_size, args.hidden_size)
+        ub_dtype = args.params_dtype
         if args.overlap_sp_ag:
-            self.ub_qkv_fw_obj = mpu.get_global_te_user_buffer("kaimm_gemm", hidden_dims, args.params_dtype, True)
-
-            self.ub_fc1_fw_obj = mpu.get_global_te_user_buffer("kaimm_gemm", hidden_dims, args.params_dtype, True)
-
+            ub_qkv_fw_args = {"name": "kaimm_gemm", "shape": ub_shape, "dtype": ub_dtype, "ag": True}
+            ub_fc1_fw_args = {"name": "kaimm_gemm", "shape": ub_shape, "dtype": ub_dtype, "ag": True}
         if args.overlap_sp_rs and args.num_experts is None:
-            self.ub_o_fw_obj   = mpu.get_global_te_user_buffer("kaimm_gemm", hidden_dims, args.params_dtype, True)  # hacked, should be reduce_scatter, coupled with layers.py
-
-            self.ub_fc2_fw_obj = mpu.get_global_te_user_buffer("kaimm_gemm", hidden_dims, args.params_dtype, True)  # hacked, should be reduce_scatter, coupled with layers.py
-
-            self.ub_o_bw_obj   = mpu.get_global_te_user_buffer("kaimm_gemm", hidden_dims, args.params_dtype, True)
-
-            self.ub_fc2_bw_obj = mpu.get_global_te_user_buffer("kaimm_gemm", hidden_dims, args.params_dtype, True)
+            ub_o_fw_args   = {"name": "kaimm_gemm", "shape": ub_shape, "dtype": ub_dtype, "ag": True}
+            ub_fc2_fw_args = {"name": "kaimm_gemm", "shape": ub_shape, "dtype": ub_dtype, "ag": True}
+            ub_o_bw_args   = {"name": "kaimm_gemm", "shape": ub_shape, "dtype": ub_dtype, "ag": True}
+            ub_fc2_bw_args = {"name": "kaimm_gemm", "shape": ub_shape, "dtype": ub_dtype, "ag": True}
 
         # Self attention.
         self.self_attention = ParallelAttention(
@@ -982,9 +977,9 @@ class ParallelTransformerLayer(MegatronModule):
             layer_number,
             attention_type=AttnType.self_attn,
             attn_mask_type=self_attn_mask_type,
-            ub_qkv_fw_obj=self.ub_qkv_fw_obj, 
-            ub_o_fw_obj=self.ub_o_fw_obj, 
-            ub_o_bw_obj=self.ub_o_bw_obj)
+            ub_qkv_fw_args=ub_qkv_fw_args,
+            ub_o_fw_args=ub_o_fw_args,
+            ub_o_bw_args=ub_o_bw_args)
         self.hidden_dropout = args.hidden_dropout
         self.bias_dropout_fusion = args.bias_dropout_fusion
         self.drop_path = DropPath(drop_path_rate) if drop_path_rate > 0.0 else None
@@ -1036,10 +1031,10 @@ class ParallelTransformerLayer(MegatronModule):
         if args.num_experts is not None:
             self.mlp = SwitchMLP(init_method, output_layer_init_method)
         else:
-            self.mlp = ParallelMLP(init_method, output_layer_init_method, 
-                                   ub_fc1_fw_obj=self.ub_fc1_fw_obj,
-                                   ub_fc2_fw_obj=self.ub_fc2_fw_obj,
-                                   ub_fc2_bw_obj=self.ub_fc2_bw_obj,
+            self.mlp = ParallelMLP(init_method, output_layer_init_method,
+                                   ub_fc1_fw_args=ub_fc1_fw_args,
+                                   ub_fc2_fw_args=ub_fc2_fw_args,
+                                   ub_fc2_bw_args=ub_fc2_bw_args,
                                    recompute_mlp_activation_func=self.recompute_mlp_activation_func)
 
         # Set bias+dropout+add fusion grad_enable execution handler.
