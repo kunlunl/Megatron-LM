@@ -45,6 +45,7 @@ _PIPELINE_MODEL_PARALLEL_SPLIT_RANK = None
 # These values enable us to change the mpu sizes on the fly.
 _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE = None
 _MPU_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = None
+_MPU_CONTEXT_PARALLEL_ALL_POSSIBLE_WORLD_SIZES = None
 _MPU_CONTEXT_PARALLEL_WORLD_SIZE = None
 _MPU_TENSOR_MODEL_PARALLEL_RANK = None
 _MPU_PIPELINE_MODEL_PARALLEL_RANK = None
@@ -188,6 +189,8 @@ def initialize_model_parallel(
     global _CONTEXT_PARALLEL_GROUP_DICT
     global _CONTEXT_PARALLEL_GROUP_SLOW_DICT
     global _CONTEXT_PARALLEL_GROUP_LOCAL_DICT
+    global _MPU_CONTEXT_PARALLEL_WORLD_SIZE
+    global _MPU_CONTEXT_PARALLEL_ALL_POSSIBLE_WORLD_SIZES
     assert _CONTEXT_PARALLEL_GROUP_DICT is None, 'context parallel group is already initialized'
     all_data_parallel_group_ranks = []
     for i in range(pipeline_model_parallel_size):
@@ -253,6 +256,8 @@ def initialize_model_parallel(
             _CONTEXT_PARALLEL_GROUP_DICT = {}
             _CONTEXT_PARALLEL_GROUP_SLOW_DICT = {}
             _CONTEXT_PARALLEL_GROUP_LOCAL_DICT = {}
+            _MPU_CONTEXT_PARALLEL_ALL_POSSIBLE_WORLD_SIZES = []
+            _MPU_CONTEXT_PARALLEL_WORLD_SIZE = context_parallel_size # TODO(kunlunl): Remove this initial value?
             _context_parallel_size = 1
             while _context_parallel_size <= data_parallel_size:
                 (
@@ -263,8 +268,8 @@ def initialize_model_parallel(
                 _CONTEXT_PARALLEL_GROUP_DICT[_context_parallel_size] = context_parallel_group
                 _CONTEXT_PARALLEL_GROUP_SLOW_DICT[_context_parallel_size] = context_parallel_group_slow
                 _CONTEXT_PARALLEL_GROUP_LOCAL_DICT[_context_parallel_size] = context_parallel_group_local
+                _MPU_CONTEXT_PARALLEL_ALL_POSSIBLE_WORLD_SIZES.append(_context_parallel_size)
                 _context_parallel_size *= 2
-            set_context_parallel_world_size(context_parallel_size) # TODO(kunlunl): What's the initial context parallel size should be?
 
     # Build the model-parallel groups.
     global _MODEL_PARALLEL_GROUP
@@ -487,6 +492,12 @@ def get_pipeline_model_parallel_world_size():
     if _MPU_PIPELINE_MODEL_PARALLEL_WORLD_SIZE is not None:
         return _MPU_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
     return torch.distributed.get_world_size(group=get_pipeline_model_parallel_group())
+
+
+def get_context_parallel_all_possible_world_sizes():
+    """Return all possible world sizes for the context parallel group."""
+    assert _MPU_CONTEXT_PARALLEL_ALL_POSSIBLE_WORLD_SIZES is not None, 'context parallel all possible world sizes is not initialized'
+    return _MPU_CONTEXT_PARALLEL_ALL_POSSIBLE_WORLD_SIZES
 
 
 def get_context_parallel_world_size():

@@ -716,6 +716,13 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
     print_datetime('before the start of training step')
     report_memory_flag = 2
     while iteration < args.train_iters:
+
+        # TODO(kunlunl): Remove this
+        possible_cp_size = mpu.get_context_parallel_all_possible_world_sizes()
+        cp_size = possible_cp_size[iteration % len(possible_cp_size)]
+        print(f"Set cp_size to {cp_size}")
+        mpu.set_context_parallel_world_size(cp_size)
+
         update_num_microbatches(args.consumed_train_samples)
         args.curr_iteration = iteration
         if args.kaimm_gc_interval > 0:

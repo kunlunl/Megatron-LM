@@ -5,7 +5,7 @@
 
 import math
 import os
-from typing import Optional, Union
+from typing import Optional, Union, Dict
 import warnings
 
 import torch
@@ -902,7 +902,7 @@ class ColumnParallelLinear(torch.nn.Module):
                  sequence_parallel_enabled: bool = False,
                  cp_overlap: bool = False,
                  hidden_size_per_attention_head: int = -1,
-                 ub_obj: Optional[tex.UbufP2PCommOverlap] = None
+                 ub_args: Optional[Dict] = None
                  ):
         super(ColumnParallelLinear, self).__init__()
 
@@ -914,7 +914,7 @@ class ColumnParallelLinear(torch.nn.Module):
         world_size = get_tensor_model_parallel_world_size()
         self.output_size_per_partition = divide(output_size, world_size)
         self.skip_bias_add = skip_bias_add
-        self.ub_obj = ub_obj
+        self.ub_args = ub_args
 
         # Parameters.
         # Note: torch.nn.functional.linear performs XA^T + b and as a result
@@ -1013,6 +1013,12 @@ class ColumnParallelLinear(torch.nn.Module):
         else:
             input_parallel = copy_to_tensor_model_parallel_region(input_)
         # Matrix multiply.
+        ub_obj = None
+        if self.ub_args is not None:    
+            name, shape, dtype, ag = self.ub_args["name"], self.ub_args["shape"], self.ub_args["dtype"], self.ub_args["ag"]
+            assert len(shape) == 2
+            shape = [shape[0] // get_context_parallel_world_size(), shape[1]]
+            ub_obj = get_global_te_user_buffer(name, shape, dtype, ag)
         if self.cp_overlap and get_context_parallel_world_size() >= 2:
             output_parallel = linear_qkv_with_grad_accumulation_and_async_allreduce(
                 input=input_parallel,
@@ -1023,7 +1029,7 @@ class ColumnParallelLinear(torch.nn.Module):
                 sequence_parallel_enabled=self.sequence_parallel_enabled,
                 hidden_size_per_attention_head=self.hidden_size_per_attention_head,
                 k_pos_emb=k_pos_emb,
-                ub_fw_obj=self.ub_obj,
+                ub_fw_obj=ub_obj,
                 recompute_norm=recompute_norm,
                 norm_module=norm_module,
             )
@@ -1035,7 +1041,7 @@ class ColumnParallelLinear(torch.nn.Module):
                 gradient_accumulation_fusion=self.gradient_accumulation_fusion,
                 async_grad_allreduce=self.async_tensor_model_parallel_allreduce,
                 sequence_parallel_enabled=self.sequence_parallel_enabled,
-                ub_fw_obj=self.ub_obj,
+                ub_fw_obj=ub_obj,
                 recompute_norm=recompute_norm,
                 norm_module=norm_module,
             )
@@ -1106,8 +1112,8 @@ class RowParallelLinear(torch.nn.Module):
                  perform_initialization=True,
                  gradient_accumulation_fusion=False,
                  sequence_parallel_enabled: bool = False,
-                 ub_fw_obj=None,
-                 ub_bw_obj=None
+                 ub_fw_args=None,
+                 ub_bw_args=None
                  ):
         super(RowParallelLinear, self).__init__()
 
@@ -1121,8 +1127,8 @@ class RowParallelLinear(torch.nn.Module):
         self.skip_bias_add = skip_bias_add
         self.gradient_accumulation_fusion = gradient_accumulation_fusion
         self.sequence_parallel_enabled = sequence_parallel_enabled
-        self.ub_fw_obj = ub_fw_obj
-        self.ub_bw_obj = ub_bw_obj
+        self.ub_fw_args = ub_fw_args
+        self.ub_bw_args = ub_bw_args
         if self.sequence_parallel_enabled and not self.input_is_parallel:
             raise RuntimeError("To enable `sequence_parallel_enabled`, `input_is_parallel` must be `True`")
 
@@ -1182,6 +1188,19 @@ class RowParallelLinear(torch.nn.Module):
             assert not self.sequence_parallel_enabled
             input_parallel = scatter_to_tensor_model_parallel_region(input_)
         # Matrix multiply.
+
+        ub_fw_obj = None
+        ub_bw_obj = None
+        if self.ub_fw_args is not None:
+            fw_name, fw_shape, fw_dtype, fw_ag = self.ub_fw_args["name"], self.ub_fw_args["shape"], self.ub_fw_args["dtype"], self.ub_fw_args["ag"]
+            assert len(fw_shape) == 2
+            fw_shape = [fw_shape[0] // get_context_parallel_world_size(), fw_shape[1]]
+            ub_fw_obj = get_global_te_user_buffer(fw_name, fw_shape, fw_dtype, fw_ag)
+        if self.ub_bw_args is not None:
+            bw_name, bw_shape, bw_dtype, bw_ag = self.ub_bw_args["name"], self.ub_bw_args["shape"], self.ub_bw_args["dtype"], self.ub_bw_args["ag"]
+            assert len(bw_shape) == 2
+            bw_shape = [bw_shape[0] // get_context_parallel_world_size(), bw_shape[1]]
+            ub_bw_obj = get_global_te_user_buffer(bw_name, bw_shape, bw_dtype, bw_ag)
         output_parallel = linear_with_grad_accumulation_and_async_allreduce(
             input=input_parallel,
             weight=self.weight,
@@ -1189,8 +1208,8 @@ class RowParallelLinear(torch.nn.Module):
             gradient_accumulation_fusion=self.gradient_accumulation_fusion,
             async_grad_allreduce=False,
             sequence_parallel_enabled=False,
-            ub_fw_obj=self.ub_fw_obj,
-            ub_bw_obj=self.ub_bw_obj,
+            ub_fw_obj=ub_fw_obj,
+            ub_bw_obj=ub_bw_obj,
             recompute_mlp_activation_func=recompute_mlp_activation_func,
             activation_func=activation_func
         )
@@ -1210,7 +1229,7 @@ class RowParallelLinear(torch.nn.Module):
 
         # All-reduce across all the partitions.
         if self.sequence_parallel_enabled:
-            if self.ub_fw_obj is None:
+            if self.ub_fw_args is None:
                 output_ = reduce_scatter_to_sequence_parallel_region(output_parallel)
 
             else:
