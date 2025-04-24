@@ -4,7 +4,7 @@ import functools
 import pathlib
 import torch
 
-from .dispatch_flash_attn import flash_attn_func, _flash_attn_forward, _flash_attn_backward
+from .dispatch_flash_attn import flash_attn_func, _flash_attn_forward, _flash_attn_backward, _flash_attn_varlen_forward, _flash_attn_varlen_backward
 
 
 # example before flip, rank 0: [0 1 2 3],   rank 1: [4 5 6 7],   rank 2: [8 9 10 11], rank 3: [12 13 14 15]
@@ -36,57 +36,57 @@ def flip_cp(x, dim, world_size):
     return o
 
 
-@functools.lru_cache
-def _get_index_select_index(world_size, rank, device):
-    return torch.tensor([rank * 2, 2 * world_size - 1 - 2 * rank], device=device)
+@torch.compile(dynamic=True)
+def mul_floordiv(x, multiplier, divisor):
+    return x * multiplier // divisor
 
 
-# def slice_cp(x, dim, world_size, rank):
-#     if world_size == 1:
-#         assert rank == 0
-#         return x
-#     vx = x.view(*x.shape[:dim], world_size * 2, x.shape[dim] // world_size // 2, *x.shape[dim + 1:])
-#     output = vx.index_select(dim, _get_index_select_index(world_size, rank, vx.device))
-#     return output.view(*x.shape[:dim], x.shape[dim] // world_size, *x.shape[dim + 1:])
-def recover_packed_seq(x, dim, world_size, total_seq_len, sample_lengths=None):
-    if sample_lengths is None:
-        return x, None, None
-    sub_sample_lengths = sample_lengths.long() * x.shape[dim] // total_seq_len
-    cu_seq_lens = F.pad(sub_sample_lengths.cumsum(0), (1, 0), 'constant', 0).int().to(x.device)
-    max_seq_len = sub_sample_lengths.max().item()
-    assert cu_seq_lens[-1] == x.shape[dim], f"Expected total length of such seq to be {cu_seq_lens[-1]}, got {x.shape[dim]} instead."
-    # put segments belonging to the same sequence together
-    if len(sample_lengths) > 1:
-        vo = x.view(*x.shape[:dim], -1, total_seq_len // world_size // 2, *x.shape[dim + 1:])
-        o = torch.cat([sliced_seq.reshape(*x.shape[:dim], -1, *x.shape[dim + 1:]) for sliced_seq in vo.split((sample_lengths // world_size // 2).tolist(), dim=dim + 1)], dim=dim)
-        assert x.shape == o.shape, f"Expected output size of {x.shape}, got {o.shape}"
-        x = o
-    return x, cu_seq_lens, max_seq_len
+# for one unique sample_lengths instance
+@functools.lru_cache(maxsize=1)
+def get_sample_slice_lengths_list(sample_lengths, divisor):
+    assert sample_lengths.device == torch.device("cpu"), f"Expect sample_lengths to be on cpu, got {sample_lengths.device}"
+    return (sample_lengths // divisor).tolist()
 
 
-def slice_packed_seq(x, dim, world_size, total_seq_len, sample_lengths=None):
-    if sample_lengths is None:
+# for dq0(oi0, dq1, oi1), dkv0, dkv1
+@functools.lru_cache(maxsize=3)
+def get_sub_sample_lengths_list(sample_lengths, multiplier, divisor):
+    assert sample_lengths.device == torch.device("cpu"), f"Expect sample_lengths to be on cpu, got {sample_lengths.device}"
+    return mul_floordiv(sample_lengths, multiplier, divisor).tolist()
+
+
+def recover_packed_seq(x, dim, world_size, total_seq_len, packing_info=None):
+    # must bypass when CP is 1
+    if world_size == 1 or packing_info is None or packing_info["num_samples"] == 1:
         return x
-    sub_sample_lengths = sample_lengths.long() * x.shape[dim] // total_seq_len
-    if len(sample_lengths) > 1:
-        vs_group = [seg.chunk(world_size * 2 * x.shape[dim] // total_seq_len, dim=dim) for seg in x.split(sub_sample_lengths.tolist(), dim=dim)]
-        vs_num_chunks = [len(vs) for vs in vs_group]
-        assert len(set(vs_num_chunks)), f"all sub sequences must be sliced into same number of chunk, got {vs_num_chunks}"
-        o = torch.cat([slice for vs in zip(*vs_group) for slice in vs], dim=dim)
-        assert x.shape == o.shape, f"Expected output size of {x.shape}, got {o.shape}"
-        x = o
-    return x
+    # put segments belonging to the same sequence together
+    sample_slice_lengths_list = get_sample_slice_lengths_list(packing_info["sample_lengths"], world_size * 2)
+    vo = x.view(*x.shape[:dim], -1, total_seq_len // world_size // 2, *x.shape[dim + 1:])
+    o = torch.cat([sliced_seq.flatten(dim, dim + 1) for sliced_seq in vo.split(sample_slice_lengths_list, dim=dim + 1)], dim=dim)
+    assert x.shape == o.shape, f"Expected output size of {x.shape}, got {o.shape}"
+    return o
 
 
-def slice_cp(x, dim, world_size, rank, sample_lengths=None):
+def slice_packed_seq(x, dim, world_size, total_seq_len, packing_info=None):
+    # must bypass when CP is 1
+    if world_size == 1 or packing_info is None or packing_info["num_samples"] == 1:
+        return x
+    sub_sample_lengths_list = get_sub_sample_lengths_list(packing_info["sample_lengths"], x.shape[dim], total_seq_len)
+    vs_group = [seg.chunk(world_size * 2 * x.shape[dim] // total_seq_len, dim=dim) for seg in x.split(sub_sample_lengths_list, dim=dim)]
+    o = torch.cat([slice for vs in zip(*vs_group) for slice in vs], dim=dim)
+    assert x.shape == o.shape, f"Expected output size of {x.shape}, got {o.shape}"
+    return o
+
+
+def slice_cp(x, dim, world_size, rank, packing_info=None):
     if world_size == 1:
         assert rank == 0
         return x
-    if sample_lengths is None:
-        sample_lengths = torch.tensor([x.shape[dim]], dtype=torch.long)
+    if packing_info is None:
+        sample_lengths_list = [x.shape[dim]]
     else:
-        assert sum(sample_lengths) == x.shape[dim]
-    vs_group = [seg.chunk(world_size * 2, dim=dim) for seg in x.split(sample_lengths.tolist(), dim=dim)]
+        sample_lengths_list = packing_info["sample_lengths"].tolist()
+    vs_group = [seg.chunk(world_size * 2, dim=dim) for seg in x.split(sample_lengths_list, dim=dim)]
     return torch.cat([vs[rank * 2] for vs in vs_group] + [vs[2 * world_size - 1 - 2 * rank] for vs in vs_group], dim=dim)
 
 
@@ -147,11 +147,13 @@ class DAttentionPreFunction(torch.autograd.Function):
 
 class DAttentionFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, qi, kv, cp_group):
+    def forward(ctx, qi, kv, cp_group, packing_info):
         ctx.cp_group = cp_group
+        ctx.packing_info = packing_info
         CP = torch.distributed.get_world_size(ctx.cp_group)
         cp_rank = torch.distributed.get_rank(ctx.cp_group)
         b, seqlen_qi, a, d = qi.shape
+        seqlen_q = seqlen_qi * CP
         seqlen_kv = kv.shape[1]
 
         if kv.transpose(0, 1).is_contiguous():
@@ -195,36 +197,90 @@ class DAttentionFunction(torch.autograd.Function):
         qi1 = qi[:, seqlen_qi // 2:]
         kv1 = kv[:, :(CP - cp_rank) * seqlen_kv // CP]
 
+        if packing_info is not None:
+            if "cp_var_len_info" in packing_info:
+                cu_q_lens0, max_q_len0, cu_k_lens0, max_k_len0, cu_q_lens1, max_q_len1, cu_k_lens1, max_k_len1 = packing_info["cp_var_len_info"]
+            else:
+                cu_seq_lens, max_seq_len, total_seq_len = [packing_info[k] for k in ["cu_seq_lens", "max_seq_len", "total_seq_len"]]
+                assert total_seq_len == kv.shape[1], f"Expected total length of such seq to be {total_seq_len}, got {kv.shape[1]} instead."
+                cu_q_lens0, max_q_len0, cu_q_lens1, max_q_len1 = [mul_floordiv(x, qi0.shape[1], seqlen_q) for x in [cu_seq_lens, max_seq_len]] * 2
+                cu_k_lens0, max_k_len0 = [mul_floordiv(x, kv0.shape[1], kv.shape[1]) for x in [cu_seq_lens, max_seq_len]]
+                cu_k_lens1, max_k_len1 = [mul_floordiv(x, kv1.shape[1], kv.shape[1]) for x in [cu_seq_lens, max_seq_len]]
+                packing_info["cp_var_len_info"] = (cu_q_lens0, max_q_len0, cu_k_lens0, max_k_len0, cu_q_lens1, max_q_len1, cu_k_lens1, max_k_len1)
+
+            if packing_info["num_samples"] > 1:
+                qi01 = qi.view(-1, seqlen_qi // 2, *qi.shape[2:])
+                qi0, qi1 = recover_packed_seq(qi01, 1, CP, seqlen_q, packing_info).chunk(2, dim=0)
+
+                kv0 = recover_packed_seq(kv0, 1, CP, kv.shape[1], packing_info)
+
+                kv1 = recover_packed_seq(kv1, 1, CP, kv.shape[1], packing_info)
+
+
         oi0, qi_padded0, k_padded0, v_padded0, out_padded0, softmax_lse0, S_dmask0, rng_state0 = (None,) * 8
         oi1, qi_padded1, k_padded1, v_padded1, out_padded1, softmax_lse1, S_dmask1, rng_state1 = (None,) * 8
 
         def attn_func0():
             nonlocal oi0, qi_padded0, k_padded0, v_padded0, out_padded0, softmax_lse0, S_dmask0, rng_state0
-            oi0, qi_padded0, k_padded0, v_padded0, out_padded0, softmax_lse0, S_dmask0, rng_state0 = _flash_attn_forward(
-                qi0,
-                kv0[:, :, 0],
-                kv0[:, :, 1],
-                dropout_p,
-                softmax_scale,
-                causal=causal,
-                window_size=window_size,
-                return_softmax=return_softmax and dropout_p > 0,
-            )
+            if packing_info is None:
+                oi0, qi_padded0, k_padded0, v_padded0, out_padded0, softmax_lse0, S_dmask0, rng_state0 = _flash_attn_forward(
+                    qi0,
+                    kv0[:, :, 0],
+                    kv0[:, :, 1],
+                    dropout_p,
+                    softmax_scale,
+                    causal=causal,
+                    window_size=window_size,
+                    return_softmax=return_softmax and dropout_p > 0,
+                )
+            else:
+                oi0, qi_padded0, k_padded0, v_padded0, out_padded0, softmax_lse0, S_dmask0, rng_state0 = _flash_attn_varlen_forward(
+                        qi0.squeeze(0),
+                        kv0[:, :, 0].squeeze(0),
+                        kv0[:, :, 1].squeeze(0),
+                        cu_q_lens0,
+                        cu_k_lens0,
+                        max_q_len0,
+                        max_k_len0,
+                        dropout_p,
+                        softmax_scale,
+                        causal=causal,
+                        window_size=window_size,
+                        return_softmax=return_softmax and dropout_p > 0
+                    )
+                qi_padded0, k_padded0, v_padded0 = [x.unsqueeze(0) for x in [qi_padded0, k_padded0, v_padded0]]
             assert (qi0.shape, kv0[:, :, 0].shape, kv0[:, :, 1].shape) == (qi_padded0.shape, k_padded0.shape, v_padded0.shape), "no support padding"
             assert (oi0.data_ptr(), oi0.shape, oi0.stride()) == (out_padded0.data_ptr(), out_padded0.shape, out_padded0.stride()), "no support padding"
 
         def attn_func1():
             nonlocal oi1, qi_padded1, k_padded1, v_padded1, out_padded1, softmax_lse1, S_dmask1, rng_state1
-            oi1, qi_padded1, k_padded1, v_padded1, out_padded1, softmax_lse1, S_dmask1, rng_state1 = _flash_attn_forward(
-                qi1,
-                kv1[:, :, 0],
-                kv1[:, :, 1],
-                dropout_p,
-                softmax_scale,
-                causal=causal,
-                window_size=window_size,
-                return_softmax=return_softmax and dropout_p > 0,
-            )
+            if packing_info is None:
+                oi1, qi_padded1, k_padded1, v_padded1, out_padded1, softmax_lse1, S_dmask1, rng_state1 = _flash_attn_forward(
+                    qi1,
+                    kv1[:, :, 0],
+                    kv1[:, :, 1],
+                    dropout_p,
+                    softmax_scale,
+                    causal=causal,
+                    window_size=window_size,
+                    return_softmax=return_softmax and dropout_p > 0,
+                )
+            else:
+                oi1, qi_padded1, k_padded1, v_padded1, out_padded1, softmax_lse1, S_dmask1, rng_state1 = _flash_attn_varlen_forward(
+                        qi1.squeeze(0),
+                        kv1[:, :, 0].squeeze(0),
+                        kv1[:, :, 1].squeeze(0),
+                        cu_q_lens1,
+                        cu_k_lens1,
+                        max_q_len1,
+                        max_k_len1,
+                        dropout_p,
+                        softmax_scale,
+                        causal=causal,
+                        window_size=window_size,
+                        return_softmax=return_softmax and dropout_p > 0
+                    )
+                qi_padded1, k_padded1, v_padded1 = [x.unsqueeze(0) for x in [qi_padded1, k_padded1, v_padded1]]
             assert (qi1.shape, kv1[:, :, 0].shape, kv1[:, :, 1].shape) == (qi_padded1.shape, k_padded1.shape, v_padded1.shape), "no support padding"
             assert (oi1.data_ptr(), oi1.shape, oi1.stride()) == (out_padded1.data_ptr(), out_padded1.shape, out_padded1.stride()), "no support padding"
 
@@ -239,6 +295,12 @@ class DAttentionFunction(torch.autograd.Function):
             attn_func0()
         torch.cuda.current_stream().wait_stream(get_cp_stream())
 
+        if packing_info is not None:
+            oi0, oi1 = [x.unsqueeze(0) for x in [oi0, oi1]]
+            if packing_info["num_samples"] > 1:
+                oi0 = slice_packed_seq(oi0, 1, CP, seqlen_q, packing_info)
+                oi1 = slice_packed_seq(oi1, 1, CP, seqlen_q, packing_info)
+
         oi = torch.concat([oi0, oi1], dim=1)
         ctx.save_for_backward(qi, oi, softmax_lse0, rng_state0, softmax_lse1, rng_state1)
         ctx.dropout_p = dropout_p
@@ -252,6 +314,7 @@ class DAttentionFunction(torch.autograd.Function):
     def backward(ctx, grad_oi, saved_data):
         CP = torch.distributed.get_world_size(ctx.cp_group)
         cp_rank = torch.distributed.get_rank(ctx.cp_group)
+        packing_info = ctx.packing_info
         saved_data._handle.wait()
         del saved_data._handle  # break circular reference
         kv = ctx.convert_saved_data_to_kv(saved_data)
@@ -274,6 +337,7 @@ class DAttentionFunction(torch.autograd.Function):
         qi, oi, softmax_lse0, rng_state0, softmax_lse1, rng_state1 = ctx.saved_tensors
         out_padded0, out_padded1 = oi.chunk(2, dim=1)
         b, seqlen_qi, a, d = qi.shape
+        seqlen_q = seqlen_qi * CP
         seqlen_kv = seqlen_qi * CP
 
         dqi = torch.empty_like(qi)
@@ -297,48 +361,114 @@ class DAttentionFunction(torch.autograd.Function):
             dkv0 = torch.empty_like(kv0)
             dkv1 = dkv[:, :kv1.shape[1]]
 
+        if packing_info is not None:
+            cu_q_lens0, max_q_len0, cu_k_lens0, max_k_len0, cu_q_lens1, max_q_len1, cu_k_lens1, max_k_len1 = packing_info["cp_var_len_info"]
+
+            if packing_info["num_samples"] > 1:
+                qi01 = qi.view(-1, seqlen_qi // 2, *qi.shape[2:])
+                doi01 = grad_oi.view(-1, seqlen_qi // 2, *grad_oi.shape[2:])
+                qi0, qi1 = recover_packed_seq(qi01, 1, CP, seqlen_q, packing_info).chunk(2, dim=0)
+                doi0, doi1 = recover_packed_seq(doi01, 1, CP, seqlen_q, packing_info).chunk(2, dim=0)
+
+                kv0 = recover_packed_seq(kv0, 1, CP, kv.shape[1], packing_info)
+
+                kv1 = recover_packed_seq(kv1, 1, CP, kv.shape[1], packing_info)
+
         get_cp_stream().wait_stream(torch.cuda.current_stream())
-        _flash_attn_backward(
-            doi0,
-            qi0,
-            kv0[:, :, 0],
-            kv0[:, :, 1],
-            out_padded0,
-            softmax_lse0,
-            dqi0,
-            dkv0[:, :, 0],
-            dkv0[:, :, 1],
-            ctx.dropout_p,
-            ctx.softmax_scale,
-            ctx.causal,
-            ctx.window_size,
-            rng_state=rng_state0,
-        )
-        with torch.cuda.stream(get_cp_stream()):
+        if packing_info is None:
             _flash_attn_backward(
-                doi1,
-                qi1,
-                kv1[:, :, 0],
-                kv1[:, :, 1],
-                out_padded1,
-                softmax_lse1,
-                dqi1,
-                dkv1[:, :, 0],
-                dkv1[:, :, 1],
+                doi0,
+                qi0,
+                kv0[:, :, 0],
+                kv0[:, :, 1],
+                out_padded0,
+                softmax_lse0,
+                dqi0,
+                dkv0[:, :, 0],
+                dkv0[:, :, 1],
                 ctx.dropout_p,
                 ctx.softmax_scale,
                 ctx.causal,
                 ctx.window_size,
-                rng_state=rng_state1,
+                rng_state=rng_state0,
             )
+            with torch.cuda.stream(get_cp_stream()):
+                _flash_attn_backward(
+                    doi1,
+                    qi1,
+                    kv1[:, :, 0],
+                    kv1[:, :, 1],
+                    out_padded1,
+                    softmax_lse1,
+                    dqi1,
+                    dkv1[:, :, 0],
+                    dkv1[:, :, 1],
+                    ctx.dropout_p,
+                    ctx.softmax_scale,
+                    ctx.causal,
+                    ctx.window_size,
+                    rng_state=rng_state1,
+                )
+        else:
+            _flash_attn_varlen_backward(
+                doi0.squeeze(0),
+                qi0.squeeze(0),
+                kv0[:, :, 0].squeeze(0),
+                kv0[:, :, 1].squeeze(0),
+                out_padded0.squeeze(0),
+                softmax_lse0,
+                dqi0.squeeze(0),
+                dkv0[:, :, 0].squeeze(0),
+                dkv0[:, :, 1].squeeze(0),
+                cu_q_lens0,
+                cu_k_lens0,
+                max_q_len0,
+                max_k_len0,
+                ctx.dropout_p,
+                ctx.softmax_scale,
+                ctx.causal,
+                ctx.window_size,
+                rng_state=rng_state0
+            )
+            with torch.cuda.stream(get_cp_stream()):
+                _flash_attn_varlen_backward(
+                    doi1.squeeze(0),
+                    qi1.squeeze(0),
+                    kv1[:, :, 0].squeeze(0),
+                    kv1[:, :, 1].squeeze(0),
+                    out_padded1.squeeze(0),
+                    softmax_lse1,
+                    dqi1.squeeze(0),
+                    dkv1[:, :, 0].squeeze(0),
+                    dkv1[:, :, 1].squeeze(0),
+                    cu_q_lens1,
+                    cu_k_lens1,
+                    max_q_len1,
+                    max_k_len1,
+                    ctx.dropout_p,
+                    ctx.softmax_scale,
+                    ctx.causal,
+                    ctx.window_size,
+                    rng_state=rng_state1
+                )
         torch.cuda.current_stream().wait_stream(get_cp_stream())
+
+        if packing_info is not None and packing_info["num_samples"] > 1:
+            dqi = dqi.view(-1, seqlen_qi // 2, *dqi.shape[2:])
+            dqi = slice_packed_seq(dqi, 1, CP, seqlen_q, packing_info).view(-1, seqlen_qi, *dqi.shape[2:])
+            if kv0_is_longer:
+                dkv0.copy_(slice_packed_seq(dkv0, 1, CP, kv.shape[1], packing_info))
+                dkv1 = slice_packed_seq(dkv1, 1, CP, kv.shape[1], packing_info)
+            else:
+                dkv0 = slice_packed_seq(dkv0, 1, CP, kv.shape[1], packing_info)
+                dkv1.copy_(slice_packed_seq(dkv1, 1, CP, kv.shape[1], packing_info))
 
         if kv0_is_longer:
             dkv[:, :dkv1.shape[1]] += dkv1
         else:
             dkv[:, :dkv0.shape[1]] += dkv0
         dkv[:, max(dkv0.shape[1], dkv1.shape[1]):] = 0
-        return dqi, dkv, None, None, None, None
+        return dqi, dkv, None, None, None, None, None
 
 
 class ShardSaveForBackwardFunction(torch.autograd.Function):
@@ -395,15 +525,15 @@ class ForwardGatherBackwardSliceFunction(torch.autograd.Function):
         return slice_cp(grad_output, ctx.dim, ctx.CP, ctx.cp_rank), None, None
 
 
-def dattention(qi, ki, vi, cp_group):
+def dattention(qi, ki, vi, cp_group, packing_info=None):
     if torch.distributed.get_world_size(cp_group) == 1:
         return flash_attn_func(qi, ki, vi, causal=True)
     kv = DAttentionPreFunction.apply(ki, vi, cp_group)
-    oi, data_to_save = DAttentionFunction.apply(qi, kv, cp_group)
+    oi, data_to_save = DAttentionFunction.apply(qi, kv, cp_group, packing_info)
     return oi, data_to_save
 
 
-def dattention_overlap(qi, kv_2sbad, cp_group):
+def dattention_overlap(qi, kv_2sbad, cp_group, packing_info=None):
     """The layout of kv_2sbad is (2, s, b, num_heads, head_dim).
     This is the native layout after gathering V and K respectively.
     """
@@ -411,7 +541,7 @@ def dattention_overlap(qi, kv_2sbad, cp_group):
     assert CP >= 2, "dattention overlap is not optimized for CP=1"
     kv = kv_2sbad.permute(2, 1, 0, 3, 4)
     kv = FlipInplaceFunction.apply(kv, CP)
-    oi, data_to_save = DAttentionFunction.apply(qi, kv, cp_group)
+    oi, data_to_save = DAttentionFunction.apply(qi, kv, cp_group, packing_info)
     return oi, data_to_save
 
 

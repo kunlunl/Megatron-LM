@@ -181,7 +181,7 @@ class CheckpointFunction(torch.autograd.Function):
               tracked/set/reset.
     """
     @staticmethod
-    def forward(ctx, run_function, distribute_saved_activations, *args):
+    def forward(ctx, run_function, distribute_saved_activations, packing_info, *args):
         ctx.run_function = run_function
         ctx.distribute_saved_activations \
             = distribute_saved_activations
@@ -192,7 +192,7 @@ class CheckpointFunction(torch.autograd.Function):
         ctx.fwd_cuda_rng_state_tracker = get_cuda_rng_tracker().get_states()
 
         with torch.no_grad():
-            outputs = run_function(*args)
+            outputs = run_function(*args, packing_info=packing_info)
 
         # Divide hidden states across model parallel group and only keep
         # the chunk corresponding to the current rank.
@@ -204,6 +204,7 @@ class CheckpointFunction(torch.autograd.Function):
 
         # Store everything.
         ctx.save_for_backward(*args)
+        ctx.packing_info = packing_info
 
         return outputs
 
@@ -230,8 +231,9 @@ class CheckpointFunction(torch.autograd.Function):
 
         # Compute the forward pass.
         detached_inputs = detach_variable(inputs)
+        packing_info = ctx.packing_info
         with torch.enable_grad():
-            outputs = ctx.run_function(*detached_inputs)
+            outputs = ctx.run_function(*detached_inputs, packing_info=packing_info)
 
         # Set the states back to what it was at the start of this function.
         torch.set_rng_state(bwd_cpu_rng_state)
@@ -243,11 +245,11 @@ class CheckpointFunction(torch.autograd.Function):
         torch.autograd.backward(outputs, args)
         grads = tuple(inp.grad if isinstance(inp, torch.Tensor) else inp
                       for inp in detached_inputs)
-        return (None, None) + grads
+        return (None, None, None) + grads
 
 
-def checkpoint(function, distribute_saved_activations, *args):
+def checkpoint(function, distribute_saved_activations, packing_info, *args):
     """Checkpoint a model or part of the model.
     This has been directly copied from torch.utils.checkpoint."""
     return CheckpointFunction.apply(function,
-                                    distribute_saved_activations, *args)
+                                    distribute_saved_activations, packing_info, *args)

@@ -48,8 +48,7 @@ def _flash_attn_forward(q, k, v, dropout_p, softmax_scale, causal, window_size, 
                                   f"flash-attn=={flash_attn.__version__} support_alibi={support_alibi}")
 
 def _flash_attn_varlen_forward(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
-                               dropout_p, softmax_scale, causal, window_size, return_softmax,
-                               *, alibi_bias_max, tp_world_size, tp_rank):
+                               dropout_p, softmax_scale, causal, window_size, return_softmax):
     if version_major == 2 and version_minor == 3 and not support_alibi:
         assert not alibi_bias_max, "this version of flash-attn does not support alibi"
         return flash_attn.flash_attn_interface._flash_attn_varlen_forward(
@@ -63,7 +62,7 @@ def _flash_attn_varlen_forward(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q
         assert window_size == (-1, -1), "flash-attn 2.2 does not support window_size"
         return flash_attn.flash_attn_interface._flash_attn_varlen_forward(
             q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, dropout_p, softmax_scale, causal, return_softmax,
-            alibi_bias_max=alibi_bias_max, tp_world_size=tp_world_size, tp_rank=tp_rank)
+            alibi_bias_max=0, tp_world_size=0, tp_rank=0)
     else:
         raise NotImplementedError(f"cannot dispatch _flash_attn_varlen_forward to "
                                   f"flash-attn=={flash_attn.__version__} support_alibi={support_alibi}")
@@ -120,11 +119,7 @@ def _flash_attn_varlen_backward(
     softmax_scale,
     causal,
     window_size,
-    rng_state=None,
-    *,
-    alibi_bias_max,
-    tp_world_size,
-    tp_rank,
+    rng_state=None
 ):
     if version_major == 2 and version_minor == 3 and not support_alibi:
         assert not alibi_bias_max, "this version of flash-attn does not support alibi"
@@ -139,7 +134,7 @@ def _flash_attn_varlen_backward(
         assert window_size == (-1, -1), "flash-attn 2.2 does not support window_size"
         return flash_attn.flash_attn_interface._flash_attn_varlen_backward(
             dout, q, k, v, out, softmax_lse, dq, dk, dv, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, dropout_p, softmax_scale, causal=causal, rng_state=rng_state,
-            alibi_bias_max=alibi_bias_max, tp_world_size=tp_world_size, tp_rank=tp_rank)
+            alibi_bias_max=0, tp_world_size=0, tp_rank=0)
     else:
         raise NotImplementedError(f"cannot dispatch _flash_attn_varlen_backward to "
                                   f"flash-attn=={flash_attn.__version__} support_alibi={support_alibi}")

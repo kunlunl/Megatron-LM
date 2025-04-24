@@ -108,13 +108,13 @@ class CachedNumMicroBatches(NumMicroBatchesCalculator):
             assert num_micro_batches > 0
         num_micro_batches = torch.tensor(num_micro_batches, dtype=self.dtype, device=self.device)
 
-        comm_buffer = [torch.zeros(1, dtype=self.dtype, device=self.device) for _ in range(dist.get_world_size(process_group))]
+        comm_buffer = torch.empty(dist.get_world_size(process_group), dtype=self.dtype, device=self.device)
 
-        dist.all_gather(comm_buffer,
-                        num_micro_batches,
-                        group=process_group)
+        dist.all_gather_into_tensor(comm_buffer,
+                                    num_micro_batches,
+                                    group=process_group)
 
-        num_micro_batches_set = set([num.item() for num in comm_buffer if num != -1])
+        num_micro_batches_set = set([num for num in comm_buffer.tolist() if num != -1])
 
         assert len(num_micro_batches_set) == 1, f"Expect unique number of microbatches, got {num_micro_batches}, please check data sampler for this inconsistency."
 

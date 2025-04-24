@@ -3,8 +3,9 @@
 """Utilities for models."""
 
 import math
-
+import functools
 import torch
+import torch.nn.functional as F
 
 from megatron import get_args
 from megatron.core import mpu
@@ -56,34 +57,36 @@ def erf_gelu(x):
     return x * 0.5 * (torch.erf(x / 1.41421).to(dtype=x.dtype)+torch.ones_like(x).to(dtype=x.dtype))
 
 
-def slice_lm_inputs_along_cp(input_ids, position_ids, attention_mask, labels):
-    if input_ids is None:  # no data loaded
-        return input_ids, position_ids, attention_mask, labels
+def slice_lm_inputs_along_cp(input_ids, position_ids, attention_mask, labels, packing_info=None):
     CP = mpu.get_context_parallel_world_size()
     args = get_args()
     if CP >= 2:
         # Check inputs with the same context parallel rank are equal
         if args.curr_iteration < args.iteration + args.kaimm_warmup_iters:
-            max_input_ids = input_ids.clone()
-            torch.distributed.all_reduce(max_input_ids, op=torch.distributed.ReduceOp.MAX,
-                                         group=mpu.get_context_parallel_group())
-            if (max_input_ids != input_ids).any():
-                raise ValueError("Inputs with the same get_data_parallel_for_sample_rank() should be equal. "
-                                 "Please check the dataloader.")
-
+            if input_ids is not None:
+                max_input_ids = input_ids.clone()
+                torch.distributed.all_reduce(max_input_ids, op=torch.distributed.ReduceOp.MAX,
+                                            group=mpu.get_context_parallel_group())
+                if (max_input_ids != input_ids).any():
+                    raise ValueError("Inputs with the same get_data_parallel_for_sample_rank() should be equal. "
+                                     "Please check the dataloader.")
+    if input_ids is not None:
         cp_rank = mpu.get_context_parallel_rank()
         if args.sft_concat:
-            assert attention_mask is not None
-            sample_lengths = attention_mask
+            assert packing_info is not None
         else:
-            sample_lengths = None
-        input_ids = dattention.slice_cp(input_ids, 1, CP, cp_rank, sample_lengths=sample_lengths)
-        position_ids = dattention.slice_cp(position_ids, 1, CP, cp_rank, sample_lengths=sample_lengths)
-        labels = dattention.slice_cp(labels, 1, CP, cp_rank, sample_lengths=sample_lengths)
+            assert packing_info is None
+        input_ids = dattention.slice_cp(input_ids, 1, CP, cp_rank, packing_info=packing_info)
+        position_ids = dattention.slice_cp(position_ids, 1, CP, cp_rank, packing_info=packing_info)
+        labels = dattention.slice_cp(labels, 1, CP, cp_rank, packing_info=packing_info)
 
     return input_ids, position_ids, attention_mask, labels
 
 
-def gather_post_lm_output_along_cp(output, total_seq_len=None, sample_lengths=None):
+def gather_post_lm_output_along_cp(output, total_seq_len=None, packing_info=None):
     output = dattention.forward_gather_backward_slice(output, 1, mpu.get_context_parallel_group())
-    return dattention.recover_packed_seq(output, 1, mpu.get_context_parallel_world_size(), total_seq_len, sample_lengths)[0]
+    return dattention.recover_packed_seq(output, 1, mpu.get_context_parallel_world_size(), total_seq_len, packing_info)
+
+@functools.lru_cache(maxsize=1)
+def get_var_len_info(sample_lengths):
+    return F.pad(sample_lengths.cumsum(0), (1, 0), 'constant', 0), sample_lengths.max().item()

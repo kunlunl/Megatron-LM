@@ -21,15 +21,18 @@ try:
 
     HAVE_APPLY_ROPE_FUSION = True
 except:
+    warnings.warn("fused_apply_rotary_pos_emb_thd is not available!")
     HAVE_APPLY_ROPE_FUSION = False
 __all__ = ['RotaryEmbedding', 'apply_rotary_pos_emb']
 
 class RotaryEmbedding(nn.Module):
     def __init__(self, dim, rope_theta=10000., use_fast_rope=False, context_parallel_world_size=1, context_parallel_rank=0):
         super().__init__()
+        args = get_args()
         self.dim = dim
+        self.rope_theta = rope_theta
         self.use_fast_rope = use_fast_rope
-        self.use_thd_rope = self.use_fast_rope and get_args().sft_concat and context_parallel_world_size == 1
+        self.use_thd_rope = args.sft_concat and context_parallel_world_size == 1 and HAVE_APPLY_ROPE_FUSION
         if self.use_thd_rope and self.use_fast_rope:
             warnings.warn("Using fused_apply_rotary_pos_emb_thd instead of fast_rotary_pos_emb")
         self.context_parallel_world_size = context_parallel_world_size
@@ -37,16 +40,14 @@ class RotaryEmbedding(nn.Module):
         self.register_buffer('dummy_buffer', torch.tensor(1.))
         if importlib.util.find_spec('einops') is None:
             raise RuntimeError("einops is required for Rotary Embedding")
-        self.forward = functools.lru_cache(maxsize=1)(self.forward)
+        self.max_seq_length = args.seq_length
+        self.get_freqs = functools.lru_cache(maxsize=1)(self.get_freqs)
+        if not args.variable_seq_lengths:
+            self.forward = functools.lru_cache(maxsize=1)(self.forward)
 
-    def forward(self, seq_len, offset=0, sample_lengths=None):
+    def get_freqs(self, max_seq_len, offset=0):
         inv_freq = 1.0 / (self.rope_theta ** (torch.arange(0, self.dim, 2, device=self.dummy_buffer.device).float() / self.dim))
-        if sample_lengths is not None and not self.use_thd_rope:
-            assert sum(sample_lengths) == seq_len
-            seq = torch.cat([torch.arange(sample_length, device=inv_freq.device) for sample_length in sample_lengths]) + offset
-        else:
-            seq = torch.arange(seq_len, device=inv_freq.device) + offset
-        seq = dattention.slice_cp(seq, 0, self.context_parallel_world_size, self.context_parallel_rank, sample_lengths=sample_lengths)
+        seq = torch.arange(max_seq_len, device=inv_freq.device) + offset
         freqs = einsum('i , j -> i j', seq.type_as(inv_freq), inv_freq)
         # first part even vector components, second part odd vector components,
         #  2 * dim in dimension size
@@ -60,6 +61,17 @@ class RotaryEmbedding(nn.Module):
         # Note(yuantailing): Store freqs (before sin/cos) in fp32 to match fast rope precision
         return freqs
 
+    def forward(self, seq_len, offset=0, packing_info=None):
+        # in case of padding
+        self.max_seq_length = max(self.max_seq_length, seq_len)
+        max_seq_len_freqs = self.get_freqs(self.max_seq_length, offset=offset)
+        if packing_info is not None and not self.use_thd_rope:
+            freqs = torch.cat([max_seq_len_freqs[:sample_length] for sample_length in packing_info["sample_lengths"].tolist()], dim=0)
+        else:
+            freqs = max_seq_len_freqs[:seq_len]
+        freqs = dattention.slice_cp(freqs, 0, self.context_parallel_world_size, self.context_parallel_rank, packing_info=packing_info)
+        # Note(lizhouyang): Wrap freqs in Parameter to prevent it from being offloaded.
+        return torch.nn.Parameter(freqs)
 
 class FastRotaryPosEmbFunction(torch.autograd.Function):
     @staticmethod
@@ -102,12 +114,13 @@ def apply_rotary_pos_emb_bshd(t, freqs, use_fast_rope=False):
     rot_dim = freqs.shape[-1]
     # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
     t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
-
     # first part is cosine component
     # second part is sine component, need to change signs with _rotate_half method
     # Note(yuantailing): Calculate sin/cos in fp32 to match fast rope precision
     t = (t * freqs.cos().to(t.dtype)) + (_rotate_half(t) * freqs.sin().to(t.dtype))
     return torch.cat((t, t_pass), dim=-1)
+
+
 def apply_rotary_pos_emb_thd(t: Tensor, cu_seqlens: Tensor, freqs: Tensor) -> Tensor:
     """A baseline implementation of applying RoPE for `thd` format.
     Args:

@@ -9,10 +9,12 @@ from megatron import get_args
 from megatron import print_rank_0
 from megatron import get_timers
 from megatron import get_tokenizer
+from megatron import get_num_microbatches
 from megatron.core import tensor_parallel
 from megatron.core.enums import ModelType
 from megatron.data.sft_dataset import build_train_valid_test_datasets
 from megatron.model import GPTModel
+from megatron.model.utils import get_var_len_info
 from megatron.training import pretrain
 from megatron.utils import get_ltor_masks_and_position_ids
 from megatron.utils import average_losses_across_data_parallel_group
@@ -56,20 +58,31 @@ def get_batch(data_iterator):
     else:
         data = None
     data_b = tensor_parallel.broadcast_data(keys, data, datatype)
-
+    packing_info = None
+    attention_mask = None
     # Unpack.
     if args.sft_concat:
         tokens = data_b['input_ids'][:, :-1].contiguous()
         labels = data_b['input_ids'][:, 1:].contiguous()
         sample_lengths = data_b['sample_lengths']
         sample_lengths[-1] -= 1
+        cu_seq_lens, max_seq_len = get_var_len_info(sample_lengths.cuda())
 
         loss_mask = data_b['label_mask'][:, 1:]
-        ignore_indices = sample_lengths[:-1].cumsum(0) - 1
+        ignore_indices = cu_seq_lens[:-1] - 1
         loss_mask.index_fill_(-1, ignore_indices, 0)
 
-        # attention_mask in sample lengths layout in favor of sample concatenation
-        attention_mask = sample_lengths
+        total_seq_len = sample_lengths.sum().item()
+        assert total_seq_len == tokens.shape[1]
+
+        packing_info = {
+            "sample_lengths": sample_lengths.cpu(),
+            "cu_seq_lens": cu_seq_lens.int(),
+            "max_seq_len": max_seq_len,
+            "num_samples": len(sample_lengths),
+            "total_seq_len": total_seq_len
+        }
+
     elif args.sft_padding or args.micro_batch_size > 1 or (args.sequence_parallel and mpu.get_tensor_model_parallel_world_size() > 1):
         tokens = data_b['input_ids'][:, :].contiguous()
         labels = torch.cat([tokens[:, 1:], torch.ones_like(tokens[:, 0].unsqueeze(1))], dim=-1).contiguous()
@@ -84,22 +97,22 @@ def get_batch(data_iterator):
         # print(f"{mpu.get_pipeline_model_parallel_rank()}/{mpu.get_pipeline_model_parallel_world_size()-1} tokens shape: {tokens.shape} labels shape: {labels.shape}")
 
     position_ids = torch.arange(tokens.shape[-1], dtype=torch.long,
-                                device=tokens.device)
+                                device=tokens.device).unsqueeze(0)
 
-    return tokens, labels, loss_mask, attention_mask, position_ids
+    return tokens, labels, loss_mask, packing_info, attention_mask, position_ids
 
 
-def loss_func(loss_mask, output_tensor, attention_mask=None):
+def loss_func(loss_mask, output_tensor, packing_info=None):
     losses = output_tensor.float()
     loss_mask = loss_mask.float()
 
     args = get_args()
 
     if args.sft_concat:
-        sample_indices = F.pad(attention_mask.cumsum(0), (1, 0), 'constant', 0).to(losses.device)
+        sample_indices = packing_info["cu_seq_lens"].long().tolist()
         loss_pairs = [((losses[..., start_idx:end_idx] * loss_mask[..., start_idx:end_idx]).sum(-1), loss_mask[..., start_idx:end_idx].int().abs().sum(-1)) for start_idx, end_idx in zip(sample_indices[:-1], sample_indices[1:])]
         loss_group = [loss_sum / valid_tokens if valid_tokens.item() != 0 else loss_sum for loss_sum, valid_tokens in loss_pairs]
-        loss = torch.cat(loss_group).sum() / args.micro_batch_size
+        loss = torch.cat(loss_group).sum() * (get_num_microbatches() * mpu.get_data_parallel_for_sample_world_size() / args.global_batch_size)
     else:
         losses = torch.sum(losses * loss_mask, dim=-1)
         loss_mask = loss_mask.int().abs().sum(-1)
@@ -120,14 +133,14 @@ def forward_step(data_iterator, model):
 
     # Get the batch.
     timers('batch-generator', log_level=2).start()
-    tokens, labels, loss_mask, attention_mask, position_ids = get_batch(
+    tokens, labels, loss_mask, packing_info, attention_mask, position_ids = get_batch(
         data_iterator)
     timers('batch-generator').stop()
 
     output_tensor = model(tokens, position_ids, attention_mask,
-                          labels=labels)
+                          labels=labels, packing_info=packing_info)
 
-    return output_tensor, partial(loss_func, loss_mask, attention_mask=attention_mask)
+    return output_tensor, partial(loss_func, loss_mask, packing_info=packing_info)
 
 
 def no_wd_decay_cond(param_name, param):
