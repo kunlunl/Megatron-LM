@@ -468,7 +468,8 @@ def train_step(forward_step_func, data_iterator,
 
     # Update learning rate.
     if update_successful:
-        increment = get_num_microbatches() * \
+        increment = args.global_batch_size if args.sft_concat else \
+                    get_num_microbatches() * \
                     args.micro_batch_size * \
                     args.data_parallel_size // \
                     args.context_parallel_size
@@ -779,7 +780,7 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
             params_norm = calc_params_l2_norm(model)
         report_memory_flag = training_log(loss_dict, total_loss_dict,
                                           optimizer.param_groups[0]['lr'],
-                                          iteration, loss_scale,
+                                          iteration, get_num_microbatches(), loss_scale,
                                           report_memory_flag, skipped_iter,
                                           grad_norm, params_norm, num_zeros_in_grad)
 

@@ -303,6 +303,9 @@ def validate_args(args, defaults={}):
         assert args.start_weight_decay is not None
         assert args.end_weight_decay is not None
 
+    if args.sft_concat_mbs1:
+        assert args.sft_concat, 'Must enable --sft-concat.'
+
     TORCH_MAJOR = int(torch.__version__.split('.')[0])
     TORCH_MINOR = int(torch.__version__.split('.')[1])
     # Persistent fused layer norm.
@@ -582,6 +585,10 @@ def _add_network_size_args(parser):
     group.add_argument('--max-position-embeddings', type=int, default=None,
                        help='Maximum number of position embeddings to use. '
                        'This is the size of position embedding.')
+    group.add_argument('--use-alibi', action='store_true',
+                       help='Use alibi scale or not')
+    group.add_argument('--alibi-bias-max', type=int, default=8,
+                       help='max alibi bias')
     group.add_argument('--use-rotary-position-embeddings', action='store_true',
                        help='Use rotary positional embeddings or not')
     group.add_argument('--rotary-percent', type=float, default=1.0,
@@ -800,6 +807,8 @@ def _add_training_args(parser):
                        help='Padding to max_length during sft.')
     mutex_group.add_argument('--sft-concat', action='store_true', default=False,
                        help='concat samples to avoid useless padding and balance load within dp group during sft.')
+    group.add_argument('--sft-concat-mbs1', action='store_true', default=False,
+                       help='force only one sample in each bucket(a.k.a. micro-batch-size=1) used for debugging.')
     group.add_argument('--ignore-index', type=int, default=-100,
                        help="Symbol that do not calculate loss.")
     group.add_argument("--padding-side", type=str, default="right",
@@ -1215,6 +1224,8 @@ def _add_data_args(parser):
     group.add_argument('--reset-attention-mask', action='store_true',
                        help='Reset self attention maske after '
                        'end-of-document token.')
+    group.add_argument('--iterable-dataset', action='store_true', default=False,
+                       help='Using iterable style datasets')
     group.add_argument('--eod-mask-loss', action='store_true',
                        help='Mask loss for the end of document tokens.')
     group.add_argument('--kaimm-async-dataloader', action='store_true',

@@ -3,6 +3,7 @@
 """Pretrain Llama"""
 
 import torch
+import torch.nn.functional as F
 from functools import partial
 from megatron import get_args
 from megatron import print_rank_0
@@ -11,7 +12,7 @@ from megatron import get_tokenizer
 from megatron.core import tensor_parallel
 from megatron.core.enums import ModelType
 from megatron.data.sft_dataset import build_train_valid_test_datasets
-from megatron.model import LlamaModel
+from megatron.model import GPTModel
 from megatron.training import pretrain
 from megatron.utils import get_ltor_masks_and_position_ids
 from megatron.utils import average_losses_across_data_parallel_group
@@ -28,8 +29,8 @@ import shutil
 def model_provider(pre_process=True, post_process=True):
     """Build the model."""
 
-    print_rank_0('building Llama model ...')
-    model = LlamaModel(
+    print_rank_0('building GPT model ...')
+    model = GPTModel(
         num_tokentypes=0,
         parallel_output=True,
         pre_process=pre_process,
@@ -65,7 +66,6 @@ def get_batch(data_iterator):
 
         loss_mask = data_b['label_mask'][:, 1:]
         ignore_indices = sample_lengths[:-1].cumsum(0) - 1
-        labels.index_fill_(-1, ignore_indices, tokenizer.pad_token_id)
         loss_mask.index_fill_(-1, ignore_indices, 0)
 
         # attention_mask in sample lengths layout in favor of sample concatenation
@@ -183,33 +183,8 @@ def train_valid_test_datasets_provider():
 
 
 if __name__ == "__main__":
-    torch.set_printoptions(precision=8)
-
-    log_params = {
-        'model': 'llama',
-        'arch': 'llama-175b',
-        'framework': 'megatron',
-        'dict': 128000,
-        'tp': 8,
-        'pp': 8, 
-        }
-
-    mlflow_dict = {}
-    mlflow_dict['experiment_name'] = "yiqiao-dev"
-    mlflow_dict['run_name'] = "13b_sft_alibi_workaround"
-    mlflow_dict['uri'] = "/nlp_group/mlflow_monitor/gpt/pretrain"
-    mlflow_dict['log_params'] = log_params
-    mlflow_dict['save_dir'] = "/nlp_group/liaoyiqiao/sft_dev/Megatron-LM/save"
-
-    import os
-    mlflow_save_path = os.path.join(mlflow_dict['uri'], mlflow_dict['experiment_name'], mlflow_dict['experiment_name'] + '_' + mlflow_dict['run_name'], "artifacts")
-    if not os.path.exists(mlflow_save_path):
-        os.makedirs(mlflow_save_path, exist_ok=True)
     pretrain(train_valid_test_datasets_provider,
              model_provider,
              ModelType.encoder_or_decoder,
              forward_step,
-             no_wd_decay_cond,
-             get_mlflow_data,
-             mlflow_dict=mlflow_dict,
              args_defaults={'tokenizer_type': 'NullTokenizerSft'})

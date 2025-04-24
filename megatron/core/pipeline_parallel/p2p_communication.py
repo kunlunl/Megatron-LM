@@ -152,7 +152,10 @@ def _p2p_ops(*,
              tensor_recv_prev: Optional[torch.Tensor],
              tensor_send_next: Optional[torch.Tensor],
              tensor_recv_next: Optional[torch.Tensor],
-             group: torch.distributed.ProcessGroup):
+             group: torch.distributed.ProcessGroup,
+             variable_seq_lengths: bool = False):
+    if variable_seq_lengths:
+        group = None
     reqs = []
     rank = get_pipeline_model_parallel_rank()
     if get_pipeline_model_parallel_rank() % 2 == 0:

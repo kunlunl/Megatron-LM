@@ -388,10 +388,11 @@ class FlashSelfAttention(torch.nn.Module):
                            (default: 0.0)
     """
     def __init__(self, causal=False, softmax_scale=None, attention_dropout=0.0,
-                 device=None, dtype=None):
+                 device=None, dtype=None, alibi_bias_max=0):
         super().__init__()
         assert flash_attn_unpadded_func is not None, ('Please install FlashAttention first, '
                                                       'e.g., with pip install flash-attn')
+        self.flash_attn_unpadded_func = flash_attn_unpadded_func
         assert rearrange is not None, 'Please install einops first, e.g., with pip install einops'
         args = get_args()
         self.causal = causal
@@ -628,7 +629,7 @@ class ParallelAttention(MegatronModule):
 
         if self.use_flash_attn and not self.cp_overlap:
             self.core_attention_flash = FlashSelfAttention(
-                causal=True, attention_dropout=args.attention_dropout
+                causal=True, attention_dropout=args.attention_dropout, alibi_bias_max=args.alibi_bias_max
             )
 
         # Output.

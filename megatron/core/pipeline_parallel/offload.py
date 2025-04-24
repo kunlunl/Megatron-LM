@@ -106,7 +106,7 @@ class ActivationGroup:
         self.num_layers_per_virtual_pipeline_stage = getattr(get_args(), 'num_layers_per_virtual_pipeline_stage', 1)
         self.kaimm_recompute_mlp_activation_func=get_args().kaimm_recompute_mlp_activation_func
         self.kaimm_recompute_norm=get_args().kaimm_recompute_norm
-        self.kaimm_recompute_mlp_fc1=get_args().kaimm_recompute_mlp_fc1
+        self.kaimm_recompute_mlp_fc1=None
         self.variable_seq_lengths = get_args().variable_seq_lengths
 
         if self.offload_ratio > .5:
