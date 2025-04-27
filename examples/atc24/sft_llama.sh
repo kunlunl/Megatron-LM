@@ -6,7 +6,7 @@ set -euo pipefail
 
 TS=`date +%Y_%m_%d_%H_%M_%S`
 
-DATA_PATH="/nlp_group/fukai07/dataset/math/O1/v2025/train.aime.json_new_tokenizer"
+DATA_PATH=/m2v_model/wuguohao03/nv_teamwork/Megatron-Kwai/dataset/github_subset_1.csv
 TOKENIZER=/nlp_group/liupeng15/toxiansheng/tokenizer.128k.data_ratio/
 TRAIN_ITERS=200
 
@@ -63,7 +63,7 @@ GPT_ARGS="
 DATA_ARGS="
     --sft-dataset \
     --sft-concat \
-    --data-impl mmap \
+    --data-impl mock \
     --train-data-path $DATA_PATH \
     --tokenizer-type NullTokenizerSft \
     --tokenizer-model $TOKENIZER \

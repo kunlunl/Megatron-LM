@@ -1219,7 +1219,7 @@ def _add_data_args(parser):
     group.add_argument('--tokenizer-model', type=str, default=None,
                        help='Sentencepiece tokenizer model.')
     group.add_argument('--data-impl', type=str, default='infer',
-                       choices=['lazy', 'cached', 'mmap', 'infer'],
+                       choices=['lazy', 'cached', 'mmap', 'infer', 'mock'],
                        help='Implementation of indexed datasets.')
     group.add_argument('--reset-position-ids', action='store_true',
                        help='Reset posistion ids after end-of-document token.')

@@ -20,6 +20,7 @@ import numpy as np
 import torch
 from megatron import print_rank_0
 import time
+import pandas as pd
 
 
 def get_available_dataset_impl():
@@ -27,6 +28,8 @@ def get_available_dataset_impl():
 
 
 def make_dataset(max_length, path, impl, skip_warmup=False):
+    if impl == 'mock' and MockSFTMMapIndexedDataset.exists(path):
+        return MockSFTMMapIndexedDataset(max_length, path, skip_warmup)
     if not SFTMMapIndexedDataset.exists(path):
         print(f"Dataset does not exist: {path}")
         print("Path should be a basename that both .meta and .bin can be appended to get full filenames.")
@@ -205,3 +208,88 @@ class SFTMMapIndexedDataset(torch.utils.data.Dataset):
                 os.path.exists(inputs_id_file_path(path)) and os.path.exists(labels_mask_file_path(path))
                 and os.path.exists(sample_index_file_path(path)) and os.path.exists(sample_size_file_path(path))
         )
+
+
+class MockSFTMMapIndexedDataset(torch.utils.data.Dataset):
+
+    def __init__(self, max_length, path, skip_warmup=False):
+        super().__init__()
+
+        self._path = None
+        self.shape_list = None
+        self.max_length = max_length
+        self._doc_idx = None
+
+        self._do_init(path, skip_warmup)
+
+    def __getstate__(self):
+        return self._path
+
+    def __setstate__(self, state):
+        self._do_init(state, skip_warmup=True)
+
+    def _do_init(self, path, skip_warmup):
+        self._path = path
+        print_rank_0("    creating dummy dataset using size...")
+        self.shape_list = np.array(pd.read_csv(self._path)).flatten()
+
+        shape_list_ = []
+        for shape_ in self.shape_list:
+            if shape_ <= self.max_length:
+                shape_list_.append(int(shape_))
+        self.shape_list = np.array(shape_list_).flatten()
+        
+        self._doc_idx = np.arange(self.shape_list.shape[0], dtype=np.int64)
+
+    def __del__(self):
+        pass
+
+    def __len__(self):
+        return len(self.shape_list)
+
+    def __getitem__(self, idx):
+        """ Good Lucky !!! Never run error !!!
+        """
+        if isinstance(idx, slice):
+            raise NotImplementedError(f"Using batch_sampler instead of sampler !!!")
+
+        if isinstance(idx, tuple):
+            idx, samples, split_num, partition_lengths, num_split_bucket_this_dp = idx
+
+            input_ids = np.ones(self.shape_list[idx], dtype=np.int64)
+            label_mask = np.ones(self.shape_list[idx], dtype=np.int64)
+
+            return dict(input_ids=input_ids,
+                        label_mask=label_mask,
+                        samples=samples,
+                        split_num=split_num,
+                        partition_lengths=partition_lengths,
+                        num_split_bucket_this_dp=num_split_bucket_this_dp)
+        else:
+            input_ids = np.ones(self.shape_list[idx], dtype=np.int64)
+            label_mask = np.ones(self.shape_list[idx], dtype=np.int64)
+
+            return dict(input_ids=input_ids,
+                        label_mask=label_mask)
+
+    @property
+    def sizes(self):
+        return self.shape_list
+
+    @property
+    def doc_idx(self):
+        return self._doc_idx
+
+    def get_doc_idx(self):
+        return self.doc_idx
+
+    def set_doc_idx(self, doc_idx_):
+        self.doc_idx = doc_idx_
+
+    @property
+    def supports_prefetch(self):
+        return False
+
+    @staticmethod
+    def exists(path):
+        return os.path.exists(path)
