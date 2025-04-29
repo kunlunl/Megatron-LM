@@ -28,7 +28,7 @@ def get_persistent_gpu_buffer(key, size):
     return _GPU_BUFFER_POOL[key][:size]
 
 
-def get_cpu_buffer(size):
+def get_cpu_buffer(size, cal_size):
     best_i = -1
     for i, buffer in enumerate(_CPU_BUFFER_POOL):
         if buffer.numel() >= size:
@@ -40,7 +40,7 @@ def get_cpu_buffer(size):
         _CPU_BUFFER_POOL.pop()
     set_ideal_affinity_for_current_gpu()
     import wrap_gemm_cuda  # TODO: move to another libraray
-    buffer = wrap_gemm_cuda.wrap_cuda_malloc_host(size)
+    buffer = wrap_gemm_cuda.wrap_cuda_malloc_host(cal_size)
     return buffer[:size]
 
 
@@ -99,6 +99,16 @@ class ActivationGroup:
     def __init__(self, tensors):
         self.tensors = sorted(tensors, key=lambda t: (not t.x.is_contiguous(), -t.shape.numel()))
         self.offload_ratio = get_args().kaimm_offload_activation_ratio
+        self.micro_batch_size=get_args().micro_batch_size
+        self.seq_length=get_args().seq_length
+        self.hidden_size=get_args().hidden_size
+        self.tensor_model_parallel_size=get_args().tensor_model_parallel_size
+        self.num_layers_per_virtual_pipeline_stage = getattr(get_args(), 'num_layers_per_virtual_pipeline_stage', 1)
+        self.kaimm_recompute_mlp_activation_func=get_args().kaimm_recompute_mlp_activation_func
+        self.kaimm_recompute_norm=get_args().kaimm_recompute_norm
+        self.kaimm_recompute_mlp_fc1=None
+        self.variable_seq_lengths = get_args().variable_seq_lengths
+
         if self.offload_ratio > .5:
             self.tensors = self.tensors[::-1]  # workaround: avoid offloading half FC1 output
 
@@ -121,6 +131,16 @@ class ActivationGroup:
                 self.map.append((top, top + n, duplicate_flag))
                 top += n
         MiB = 2 ** 20
+        ratio = (39.6 + 4 / 128 + 8 / self.hidden_size)
+        if self.micro_batch_size == 1:
+            ratio = ratio - 2
+        if self.kaimm_recompute_mlp_activation_func:
+            ratio = ratio - (2 * 2.7 * 2)
+        if self.kaimm_recompute_norm:
+            ratio = ratio - (2 * 2)
+        if self.kaimm_recompute_mlp_fc1:
+            ratio = ratio - (4 * 2.7)
+        cal_size = int(math.ceil(1.001*ratio * self.micro_batch_size * self.seq_length * self.hidden_size / self.tensor_model_parallel_size * self.num_layers_per_virtual_pipeline_stage *self.offload_ratio))
         offload_size = (int(math.ceil(top * self.offload_ratio)) + MiB - 1) // MiB * MiB
         if use_bucket:
             buffer = get_persistent_gpu_buffer("offload", offload_size)
@@ -154,7 +174,10 @@ class ActivationGroup:
                 if duplicate_flag:
                     raise NotImplementedError("does not support partially offload duplicate tensors")
                 tensor.x = tensor.x.clone()
-        self.buffer_cpu = get_cpu_buffer(offload_size)
+        if self.variable_seq_lengths:
+            self.buffer_cpu = get_cpu_buffer(offload_size,cal_size)
+        else:
+            self.buffer_cpu = get_cpu_buffer(offload_size,offload_size)        
         stream = get_memcpy_stream("offload")
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):

@@ -8,7 +8,7 @@ import torch
 
 from megatron import dist_signal_handler
 from megatron.tokenizer import build_tokenizer
-from .microbatches import build_num_microbatches_calculator
+from .microbatches import build_num_microbatches_calculator, CachedNumMicroBatches
 from .timers import Timers
 
 _GLOBAL_ARGS = None
@@ -43,6 +43,19 @@ def update_num_microbatches(consumed_samples, consistency_check=True):
     _GLOBAL_NUM_MICROBATCHES_CALCULATOR.update(consumed_samples,
                                                consistency_check)
 
+def push_cached_num_microbatches(incoming_num_micro_batch):
+    assert isinstance(_GLOBAL_NUM_MICROBATCHES_CALCULATOR, CachedNumMicroBatches)
+    _GLOBAL_NUM_MICROBATCHES_CALCULATOR.update_cache(incoming_num_micro_batch)
+
+
+def step_cached_num_microbatches(process_group=None):
+    assert isinstance(_GLOBAL_NUM_MICROBATCHES_CALCULATOR, CachedNumMicroBatches)
+    _GLOBAL_NUM_MICROBATCHES_CALCULATOR.step(process_group=process_group)
+
+
+def get_num_samples_global_batch(process_group=None):
+    assert isinstance(_GLOBAL_NUM_MICROBATCHES_CALCULATOR, CachedNumMicroBatches)
+    return _GLOBAL_NUM_MICROBATCHES_CALCULATOR.get_num_samples_global_batch(process_group=process_group)
 
 def get_tokenizer():
     """Return tokenizer."""

@@ -20,4 +20,4 @@ export PP_l=1
 export CKPT=full
 export OFFLOAD_ALPHA=0
 
-./pretrain_llama.sh
+./sft_llama.sh

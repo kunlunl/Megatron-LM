@@ -4,9 +4,15 @@
 
 from abc import ABC
 from abc import abstractmethod
+import torch
+import torch.distributed as dist
+from collections import deque
 
 
 def build_num_microbatches_calculator(args):
+
+    if args.sft_concat:
+        return CachedNumMicroBatches()
 
     # Constant num micro-batches.
     if args.rampup_batch_size is None:
@@ -73,6 +79,46 @@ class ConstantNumMicroBatches(NumMicroBatchesCalculator):
 
     def update(self, consumed_samples, consistency_check):
         pass
+
+class CachedNumMicroBatches(NumMicroBatchesCalculator):
+
+    def __init__(self, device="cuda", dtype=torch.int64):
+        self.num_micro_batches_queue = None
+        self.device = device
+        self.dtype = dtype
+        # self.num_samples_global_batch_queue = deque()
+        self.num_micro_batches = None
+
+    def get(self):
+        return self.num_micro_batches
+
+    def update(self, consumed_samples, consistency_check):
+        pass
+
+    def update_cache(self, incoming_num_micro_batch):
+        if self.num_micro_batches_queue is None:
+            self.num_micro_batches_queue = deque()
+        self.num_micro_batches_queue.append(incoming_num_micro_batch)
+
+    def step(self, process_group=None):
+        # -1 means no num microbathes will be pushed by this rank
+        num_micro_batches = -1
+        if self.num_micro_batches_queue is not None:
+            num_micro_batches = self.num_micro_batches_queue.popleft()
+            assert num_micro_batches > 0
+        num_micro_batches = torch.tensor(num_micro_batches, dtype=self.dtype, device=self.device)
+
+        comm_buffer = torch.empty(dist.get_world_size(process_group), dtype=self.dtype, device=self.device)
+
+        dist.all_gather_into_tensor(comm_buffer,
+                                    num_micro_batches,
+                                    group=process_group)
+
+        num_micro_batches_set = set([num for num in comm_buffer.tolist() if num != -1])
+
+        assert len(num_micro_batches_set) == 1, f"Expect unique number of microbatches, got {num_micro_batches}, please check data sampler for this inconsistency."
+
+        self.num_micro_batches = num_micro_batches_set.pop()
 
 
 class RampupBatchsizeNumMicroBatches(NumMicroBatchesCalculator):

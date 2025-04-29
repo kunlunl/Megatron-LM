@@ -321,6 +321,9 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
             if(not sequence_parallel): # rs
                 output = torch.matmul(total_input, weight.t())
                 output = _reduce_scatter_along_first_dim(output)
+                total_input = total_input.view(-1, total_input.shape[-1])
+
+
             else: # ag
                 out_dim_size[0]  = out_dim_size[0] * world_size
                 out_dim_size[-1] = weight.shape[0]
@@ -396,7 +399,8 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
             ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG
             dim_size = list(grad_output.shape)
 
-            ub_bw_obj.copy_input_to_ubuf(grad_output, True)
+            # ub_bw_obj.copy_input_to_ubuf(grad_output, True)
+            ub_bw_obj.copy_input_to_ubuf(grad_output.view(-1, grad_output.shape[-1]), True)
             grad_output_all = ub_bw_obj.get_ubuf_output(1)
             grad_input, _, _ = te_gemm(
                 weight,
@@ -666,10 +670,10 @@ class LinearQKVWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
         if k_pos_emb is not None:
             import fast_rotary_pos_emb
             ki = fast_rotary_pos_emb.forward(ki, k_pos_emb, True)
-        if b >= 2:
-            warnings.warn("There is a performance regression issue that can be fixed by customizing the fast_roraty_pos_emb output layout")
-            assert not ki.is_contiguous(), "Remove the branch if the performance regression issue is fixed"
-            ki = ki.contiguous()
+            if b >= 2:
+                warnings.warn("There is a performance regression issue that can be fixed by customizing the fast_roraty_pos_emb output layout")
+                assert not ki.is_contiguous(), "Remove the branch if the performance regression issue is fixed"
+                ki = ki.contiguous()
         handle.wait()
         assert ki.is_contiguous()
         handle = torch.distributed.all_gather_into_tensor(kv[0], ki, group=get_context_parallel_group(), async_op=True)

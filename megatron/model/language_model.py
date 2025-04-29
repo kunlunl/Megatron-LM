@@ -374,6 +374,7 @@ class TransformerLanguageModel(MegatronModule):
         self.encoder_hidden_state = None
         self.add_retriever = args.retro_add_retriever
         self.untie_embeddings_and_output_weights = args.untie_embeddings_and_output_weights
+        self.sequence_parallel = args.sequence_parallel
 
         # Embeddings.
         if self.pre_process:
@@ -400,7 +401,7 @@ class TransformerLanguageModel(MegatronModule):
             # partial rotary embeddings, which is better than full rotary
             # Wang and Komatsuzaki et al
             # https://github.com/kingoflolz/mesh-transformer-jax/
-            self.rotary_pos_emb = RotaryEmbedding(rotary_dim, args.use_fast_rope,
+            self.rotary_pos_emb = RotaryEmbedding(rotary_dim, args.rope_theta, args.use_fast_rope,
                                                   mpu.get_context_parallel_world_size(),
                                                   mpu.get_context_parallel_rank())
 
@@ -479,7 +480,7 @@ class TransformerLanguageModel(MegatronModule):
         else:
             raise Exception('Stage must have at least either encoder or decoder')
 
-    def forward(self, enc_input_ids, enc_position_ids, enc_attn_mask,
+    def forward(self, enc_input_ids, enc_position_ids, enc_attn_mask, packing_info=None,
                 dec_input_ids=None, dec_position_ids=None, dec_attn_mask=None,
                 retriever_input_ids=None,
                 retriever_position_ids=None,
@@ -511,7 +512,13 @@ class TransformerLanguageModel(MegatronModule):
                 rotary_pos_emb = \
                     self.rotary_pos_emb(inference_params.max_sequence_len)
             else:
-                rotary_pos_emb = self.rotary_pos_emb(self.seq_length)
+                if encoder_input is not None:
+                    seq_len = encoder_input.shape[0]
+                else:
+                    seq_len = self.encoder.input_tensor.shape[0]
+                if self.sequence_parallel:
+                    seq_len *= mpu.get_tensor_model_parallel_world_size()
+                rotary_pos_emb = self.rotary_pos_emb(seq_len * mpu.get_context_parallel_world_size(), packing_info=packing_info)
 
         # Run encoder.
         if enc_hidden_states is None:
@@ -519,6 +526,7 @@ class TransformerLanguageModel(MegatronModule):
                 encoder_output = self.encoder(
                     encoder_input,
                     enc_attn_mask,
+                    packing_info=packing_info,
                     retriever_input=retriever_input,
                     retriever_attn_mask=retriever_attn_mask,
                     inference_params=inference_params,

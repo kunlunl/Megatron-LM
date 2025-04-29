@@ -208,7 +208,7 @@ def validate_args(args, defaults={}):
     # across batches/microbatches. Due to additional communication overhead
     # during pipeline parallelism, it should not be set if sequence length
     # is constant during training.
-    args.variable_seq_lengths = False
+    #args.variable_seq_lengths = False
 
     # Iteration-based training.
     if args.train_iters:
@@ -303,6 +303,9 @@ def validate_args(args, defaults={}):
         assert args.start_weight_decay is not None
         assert args.end_weight_decay is not None
 
+    if args.sft_concat_mbs1:
+        assert args.sft_concat, 'Must enable --sft-concat.'
+
     TORCH_MAJOR = int(torch.__version__.split('.')[0])
     TORCH_MINOR = int(torch.__version__.split('.')[1])
     # Persistent fused layer norm.
@@ -384,6 +387,14 @@ def validate_args(args, defaults={}):
     # Disable bias gelu fusion if we are disabling bias altogether
     if not args.add_bias_linear:
         args.bias_gelu_fusion = False
+
+    # alibi_bias_max should larger than 0 when using alibi
+    if(args.use_alibi):
+        assert args.alibi_bias_max > 0, \
+            'alibi_bias_max must be larger than 0 when using alibi'
+    else:
+        args.alibi_bias_max = 0
+
 
     # Load retro args.
     if args.retro_workdir:
@@ -574,8 +585,14 @@ def _add_network_size_args(parser):
     group.add_argument('--max-position-embeddings', type=int, default=None,
                        help='Maximum number of position embeddings to use. '
                        'This is the size of position embedding.')
+    group.add_argument('--use-alibi', action='store_true',
+                       help='Use alibi scale or not')
+    group.add_argument('--alibi-bias-max', type=int, default=8,
+                       help='max alibi bias')
     group.add_argument('--use-rotary-position-embeddings', action='store_true',
                        help='Use rotary positional embeddings or not')
+    group.add_argument('--rope-theta', type=float, default=10000.,
+                       help='The base period of the RoPE embeddings.')
     group.add_argument('--rotary-percent', type=float, default=1.0,
                        help='Percent of rotary dimension to use, default 100%')
     group.add_argument('--no-position-embedding',
@@ -721,6 +738,8 @@ def _add_regularization_args(parser):
 def _add_training_args(parser):
     group = parser.add_argument_group(title='training')
 
+    mutex_group = parser.add_mutually_exclusive_group()
+
     group.add_argument('--micro-batch-size', type=int, default=None,
                        help='Batch size per model instance (local batch size). '
                        'Global batch size is local batch size times data '
@@ -780,9 +799,24 @@ def _add_training_args(parser):
                        'uniformly divided recompute unit, '
                        '2) block: the number of individual Transformer layers '
                        'to recompute within each pipeline stage.')
-    group.add_argument('--no-clone-scatter-output-in-embedding', action='store_false',
-                       help='If not set, clone the output of the scatter in embedding layer to GC original tensor.',
-                       dest='clone_scatter_output_in_embedding')
+    group.add_argument('--clone-scatter-output-in-embedding', action='store_true',
+                       help='Clone the output of the scatter in embedding layer to GC original tensor.')
+    group.add_argument('--variable-seq-lengths', action='store_true', default=False,
+                       help='Using variable seq length across micro-batch')
+    group.add_argument('--sft-dataset', action='store_true', default=False,
+                       help='Using sft datasets.')
+    mutex_group.add_argument('--sft-padding', action='store_true', default=False,
+                       help='Padding to max_length during sft.')
+    mutex_group.add_argument('--sft-concat', action='store_true', default=False,
+                       help='concat samples to avoid useless padding and balance load within dp group during sft.')
+    group.add_argument('--sft-concat-mbs1', action='store_true', default=False,
+                       help='force only one sample in each bucket(a.k.a. micro-batch-size=1) used for debugging.')
+    group.add_argument('--ignore-index', type=int, default=-100,
+                       help="Symbol that do not calculate loss.")
+    group.add_argument("--padding-side", type=str, default="right",
+                       help="Huggingface tokenizer padding side.")
+    group.add_argument("--use-fast", action='store_true', default=False,
+                       help='Enable huggingface tokenizer use_fast.')
 
 
     # deprecated
@@ -1176,18 +1210,24 @@ def _add_data_args(parser):
                                 'GPT2BPETokenizer',
                                 'SentencePieceTokenizer',
                                 'GPTSentencePieceTokenizer',
-                                'NullTokenizer'],
+                                'NullTokenizer',
+                                'NullTokenizerSft',
+                                'NullTokenizerPlusOne',
+                                'HuggingfacePretrained',
+                                'LLamaCsharp'],
                        help='What type of tokenizer to use.')
     group.add_argument('--tokenizer-model', type=str, default=None,
                        help='Sentencepiece tokenizer model.')
     group.add_argument('--data-impl', type=str, default='infer',
-                       choices=['lazy', 'cached', 'mmap', 'infer'],
+                       choices=['lazy', 'cached', 'mmap', 'infer', 'mock'],
                        help='Implementation of indexed datasets.')
     group.add_argument('--reset-position-ids', action='store_true',
                        help='Reset posistion ids after end-of-document token.')
     group.add_argument('--reset-attention-mask', action='store_true',
                        help='Reset self attention maske after '
                        'end-of-document token.')
+    group.add_argument('--iterable-dataset', action='store_true', default=False,
+                       help='Using iterable style datasets')
     group.add_argument('--eod-mask-loss', action='store_true',
                        help='Mask loss for the end of document tokens.')
     group.add_argument('--kaimm-async-dataloader', action='store_true',

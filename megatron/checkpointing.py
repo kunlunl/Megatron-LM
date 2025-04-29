@@ -160,8 +160,6 @@ def read_metadata(tracker_filename):
                 print_rank_0('ERROR: Invalid metadata file {}. Exiting'.format(
                     tracker_filename))
                 sys.exit()
-    assert iteration > 0 or release, 'error parsing metadata file {}'.format(
-        tracker_filename)
 
     # Get the max iteration retrieved across the ranks.
     if torch.distributed.is_initialized():
@@ -272,6 +270,26 @@ def save_checkpoint(iteration, model, optimizer, opt_param_scheduler):
         ensure_directory_exists(checkpoint_name)
         torch.save(state_dict, checkpoint_name)
         fix_query_key_value_ordering(model, state_dict['checkpoint_version'])
+
+    is_pipeline_last_stage = mpu.is_pipeline_last_stage(ignore_virtual=True)
+    tp = mpu.get_tensor_model_parallel_rank()
+    dp = mpu.get_data_parallel_rank()
+    # Save dataloader state for resume (only in global rank 0)
+    if args.iterable_dataset and dataloader is not None and is_pipeline_last_stage and tp == dp == 0:
+        dataloader_checkpoint_name = get_dataloader_checkpoint_name(os.path.join(args.save, 'iter_{:07d}/'.format(iteration)))
+        if isinstance(dataloader, list):
+            dataloader_state_dict = dataloader[-1]._dataset.state_dict()
+        else:
+            dataloader_state_dict = dataloader._dataset.state_dict()
+        torch.save(dataloader_state_dict, dataloader_checkpoint_name)
+    elif args.sft_dataset:
+        if is_pipeline_last_stage and tp == dp == 0:
+            dataloader_checkpoint_name = get_dataloader_checkpoint_name(os.path.join(args.save, 'iter_{:07d}/'.format(iteration)))
+            if isinstance(dataloader, list):
+                dataloader_state_dict = dataloader[-1]._index_sampler.state_dict()
+            else:
+                dataloader_state_dict = dataloader._index_sampler.state_dict()
+            torch.save(dataloader_state_dict, dataloader_checkpoint_name)
 
     # Wait so everyone is done (necessary)
     if torch.distributed.is_initialized():
@@ -608,11 +626,19 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
                     raise NotImplementedError("fix qkv layout in non-distributed optimizer is not implemented")
 
             # Load scheduler.
-            if opt_param_scheduler is not None:
+            if opt_param_scheduler is not None and (not args.sft_dataset) :
                 if 'lr_scheduler' in state_dict: # backward compatbility
                     opt_param_scheduler.load_state_dict(state_dict['lr_scheduler'])
                 else:
                     opt_param_scheduler.load_state_dict(state_dict['opt_param_scheduler'])
+            if args.sft_dataset:
+                if iteration > 0:
+                    if opt_param_scheduler is not None:
+                        if 'lr_scheduler' in state_dict: # backward compatbility
+                            opt_param_scheduler.load_state_dict(state_dict['lr_scheduler'])
+                        else:
+                            opt_param_scheduler.load_state_dict(state_dict['opt_param_scheduler'])
+
         except KeyError:
             print_rank_0('Unable to load optimizer from checkpoint {}. '
                          'Specify --no-load-optim or --finetune to prevent '

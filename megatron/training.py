@@ -37,6 +37,9 @@ from megatron.model import DistributedDataParallel as LocalDDP
 from megatron.utils import check_adlr_autoresume_termination
 from megatron.utils import unwrap_model
 from megatron.data.data_samplers import build_pretraining_data_loader
+from megatron.data.data_samplers import build_sft_data_loader
+from megatron.global_vars import step_cached_num_microbatches
+
 from megatron.utils import calc_params_l2_norm
 from megatron.core.pipeline_parallel import get_forward_backward_func
 from megatron.utils import report_memory
@@ -465,7 +468,8 @@ def train_step(forward_step_func, data_iterator,
 
     # Update learning rate.
     if update_successful:
-        increment = get_num_microbatches() * \
+        increment = args.global_batch_size if args.sft_concat else \
+                    get_num_microbatches() * \
                     args.micro_batch_size * \
                     args.data_parallel_size // \
                     args.context_parallel_size
@@ -488,7 +492,7 @@ def train_step(forward_step_func, data_iterator,
     return {}, skipped_iter, grad_norm, num_zeros_in_grad
 
 
-def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
+def training_log(loss_dict, total_loss_dict, learning_rate, iteration,num_microbatches,
                  loss_scale, report_memory_flag, skipped_iter,
                  grad_norm, params_norm, num_zeros_in_grad):
     """Log training information such as losses, timing, ...."""
@@ -556,7 +560,7 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
     # Calculate batch size.
     batch_size = args.micro_batch_size * \
         (args.data_parallel_size // args.context_parallel_size) * \
-        get_num_microbatches()
+        num_microbatches if not args.sft_concat else args.global_batch_size
 
     total_iterations = total_loss_dict[advanced_iters_key] + \
                        total_loss_dict[skipped_iters_key]
@@ -631,6 +635,8 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
 
         log_string = ' iteration {:8d}/{:8d} |'.format(
             iteration, args.train_iters)
+        log_string += ' num_microbatches: {:5d} |'.format(
+            num_microbatches)
         log_string += ' consumed samples: {:12d} |'.format(
             args.consumed_train_samples)
         log_string += ' elapsed time per iteration (ms): {:.1f} |'.format(
@@ -670,7 +676,38 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
     return report_memory_flag
 
 
-def save_checkpoint_and_time(iteration, model, optimizer, opt_param_scheduler):
+
+def calculate_mfu(elapsed_time):
+    args = get_args()
+    GPU_throughput_map = {
+    "H800": 132*4*1024 * 1830e6,  # 989.4 TFLOPS
+    "A800": 108*4*512 * 1410e6,  # 311.9 TFLOPS
+    "H20": 148e12
+}
+    cluster_name = args.arch_type
+    s2 = args.iter_trained_tokens_power2
+    s1 = args.iter_trained_tokens
+
+    L = args.num_layers
+    h = args.hidden_size
+    g = args.num_attention_heads/args.num_query_groups
+    a = args.num_attention_heads
+    H = args.ffn_hidden_size 
+    V = args.padded_vocab_size
+    t = mpu.get_tensor_model_parallel_world_size()
+    c = mpu.get_context_parallel_world_size()
+    p = mpu.get_pipeline_model_parallel_world_size()
+    d = mpu.get_data_parallel_world_size()
+    T = elapsed_time
+    if args.sft_concat:
+        s2 = s2
+        s1 = s1
+        #for local packing,s2=s2/d,s1=s1/d
+        #for global packing,s2=s2,s1=s1
+    mfu = (L*h**2*((4*s1+4*s1*g/a+2*s2/h+6*H*s1/h)*3) + 6*s1*h*V)/ T / ((t*c*p*d)*GPU_throughput_map[cluster_name])
+    return mfu
+
+def save_checkpoint_and_time(iteration, model, optimizer, opt_param_scheduler, train_data_iterator):
     args = get_args()
     timers = get_timers()
     # Extra barrier is added to make sure
@@ -713,6 +750,8 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
     report_memory_flag = 2
     while iteration < args.train_iters:
         update_num_microbatches(args.consumed_train_samples)
+        if args.sft_concat:
+            step_cached_num_microbatches()
         args.curr_iteration = iteration
         if args.kaimm_gc_interval > 0:
             if iteration % args.kaimm_gc_interval == 0:
@@ -727,9 +766,10 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
                            optimizer,
                            opt_param_scheduler)
         iteration += 1
-        args.consumed_train_samples += mpu.get_data_parallel_for_sample_world_size() * \
-                                       args.micro_batch_size * \
-                                       get_num_microbatches()
+        args.consumed_train_samples += args.global_batch_size if args.sft_concat else \
+                                        mpu.get_data_parallel_for_sample_world_size() * \
+                                        args.micro_batch_size * \
+                                        get_num_microbatches()
 
         # Logging.
         loss_scale = optimizer.get_loss_scale().item()
@@ -738,7 +778,7 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
             params_norm = calc_params_l2_norm(model)
         report_memory_flag = training_log(loss_dict, total_loss_dict,
                                           optimizer.param_groups[0]['lr'],
-                                          iteration, loss_scale,
+                                          iteration, get_num_microbatches(), loss_scale,
                                           report_memory_flag, skipped_iter,
                                           grad_norm, params_norm, num_zeros_in_grad)
 
@@ -917,6 +957,23 @@ def cyclic_iter(iter):
             yield x
 
 
+class cyclic_generator():
+    #Todo:move the cyclic function to dataloader.
+    def __init__(self, dataloader, global_batch_size):
+        self.dataloader = dataloader
+        self.dataloader_iter = iter(self.dataloader)
+        self._index_sampler = self.dataloader_iter._index_sampler
+        
+    def __next__(self):
+        try:
+            data = next(self.dataloader_iter)
+        except StopIteration:
+            del self.dataloader_iter
+            self.dataloader_iter = iter(self.dataloader)
+            data = next(self.dataloader_iter)
+        return data
+
+
 def build_train_valid_test_data_loaders(
         build_train_valid_test_datasets_provider):
     """XXX"""
@@ -926,45 +983,75 @@ def build_train_valid_test_data_loaders(
 
     print_rank_0('> building train, validation, and test datasets ...')
 
-    # Backward compatibility, assume fixed batch size.
-    if args.iteration > 0 and args.consumed_train_samples == 0:
-        assert args.train_samples is None, \
-            'only backward compatiblity support for iteration-based training'
-        args.consumed_train_samples = args.iteration * args.global_batch_size
-    if args.iteration > 0 and args.consumed_valid_samples == 0:
-        if args.train_samples is None:
-            args.consumed_valid_samples = (args.iteration // args.eval_interval) * \
-                args.eval_iters * args.global_batch_size
+    if (not args.iterable_dataset and not args.sft_dataset) or (args.sft_dataset and args.iteration > 0 and args.consumed_train_samples == 0) :
+        # Backward compatibility, assume fixed batch size.
+        if args.iteration > 0 and args.consumed_train_samples == 0:
+            assert args.train_samples is None, \
+                'only backward compatiblity support for iteration-based training'
+            args.consumed_train_samples = args.iteration * args.global_batch_size
+        if args.iteration > 0 and args.consumed_valid_samples == 0:
+            if args.train_samples is None:
+                args.consumed_valid_samples = (args.iteration // args.eval_interval) * \
+                    args.eval_iters * args.global_batch_size
 
     # Data loader only on rank 0 of each model parallel group.
     if mpu.get_tensor_model_parallel_rank() == 0:
 
-        # Number of train/valid/test samples.
-        if args.train_samples:
-            train_samples = args.train_samples
-        else:
-            train_samples = args.train_iters * args.global_batch_size
-        eval_iters = (args.train_iters // args.eval_interval + 1) * \
-                     args.eval_iters
-        test_iters = args.eval_iters
-        train_val_test_num_samples = [train_samples,
-                                      eval_iters * args.global_batch_size,
-                                      test_iters * args.global_batch_size]
-        print_rank_0(' > datasets target sizes (minimum size):')
-        print_rank_0('    train:      {}'.format(train_val_test_num_samples[0]))
-        print_rank_0('    validation: {}'.format(train_val_test_num_samples[1]))
-        print_rank_0('    test:       {}'.format(train_val_test_num_samples[2]))
+        # build the dataset
+        if (not args.iterable_dataset and not args.sft_dataset) :
+            # Number of train/valid/test samples.
+            if args.train_samples:
+                train_samples = args.train_samples
+            else:
+                train_samples = args.train_iters * args.global_batch_size
+            eval_iters = (args.train_iters // args.eval_interval + 1) * \
+                         args.eval_iters
+            test_iters = args.eval_iters
+            train_val_test_num_samples = [train_samples,
+                                          eval_iters * args.global_batch_size,
+                                          test_iters * args.global_batch_size]
+            print_rank_0(' > datasets target sizes (minimum size):')
+            print_rank_0('    train:      {}'.format(train_val_test_num_samples[0]))
+            print_rank_0('    validation: {}'.format(train_val_test_num_samples[1]))
+            print_rank_0('    test:       {}'.format(train_val_test_num_samples[2]))
 
-        # Build the datasets.
-        train_ds, valid_ds, test_ds = build_train_valid_test_datasets_provider(
-            train_val_test_num_samples)
+            # Build the datasets.
+            train_ds, valid_ds, test_ds = build_train_valid_test_datasets_provider(
+                train_val_test_num_samples)
+        elif args.iterable_dataset:
+            # Build the datasets.
+            train_ds, valid_ds, test_ds = build_train_valid_test_datasets_provider()
+            if args.iteration > 0:
+                args.consumed_train_samples = args.iteration * args.global_batch_size
+                print_rank_0(f"> Start load dataloader ckpt for resume -----------------")
+                directory = os.path.join(args.load, 'iter_{:07d}'.format(args.iteration))
+                dataloader_state_dict = torch.load(os.path.join(directory, 'dataloader.pt'))
+                if train_ds is not None:
+                    print_rank_0(f" > Init Dataloader state_dict: \n {train_ds.state_dict()}")
+                    train_ds.load_state_dict(dataloader_state_dict)
+                    print_rank_0(f" > Loaded Dataloader state_dict: \n {train_ds.state_dict()}")
+                    print_rank_0(f"> Suceess to load dataloader ckpt -----------------------")
+
+        elif args.sft_dataset:
+            print_rank_0(" > Init SFTDataloader}")
+            train_ds, valid_ds, test_ds = build_train_valid_test_datasets_provider()
+            print_rank_0(" > Init SFTDataloader Done}")
 
         # Build dataloders.
-        train_dataloader = build_pretraining_data_loader(
-            train_ds, args.consumed_train_samples)
-        valid_dataloader = build_pretraining_data_loader(
-            valid_ds, args.consumed_valid_samples)
-        test_dataloader = build_pretraining_data_loader(test_ds, 0)
+        if args.sft_dataset:
+            train_dataloader = build_sft_data_loader(train_ds)
+            if args.iteration > 0:
+                directory = os.path.join(args.load, 'iter_{:07d}'.format(args.iteration))
+                dataloader_state_dict = torch.load(os.path.join(directory, 'dataloader.pt'))
+                train_dataloader.batch_sampler.load_state_dict(dataloader_state_dict)
+            valid_dataloader = build_sft_data_loader(valid_ds)
+            test_dataloader = build_sft_data_loader(test_ds)
+        else:
+            train_dataloader = build_pretraining_data_loader(
+                train_ds, args.consumed_train_samples)
+            valid_dataloader = build_pretraining_data_loader(
+                valid_ds, args.consumed_valid_samples)
+            test_dataloader = build_pretraining_data_loader(test_ds, 0)
 
         # Flags to know if we need to do training/validation/testing.
         do_train = train_dataloader is not None and args.train_iters > 0
@@ -1000,23 +1087,42 @@ def build_train_valid_test_data_iterators(
     # Build iterators.
     dl_type = args.dataloader_type
     assert dl_type in ['single', 'cyclic']
+    if args.sft_dataset:
+        if train_dataloader is not None:
+            train_data_iterator = iter(train_dataloader) if dl_type == 'single' \
+                              else cyclic_generator(train_dataloader, args.global_batch_size)
+        else:
+            train_data_iterator = None
 
-    if train_dataloader is not None:
-        train_data_iterator = iter(train_dataloader) if dl_type == 'single' \
-                              else iter(cyclic_iter(train_dataloader))
-    else:
-        train_data_iterator = None
+        if valid_dataloader is not None:
+            valid_data_iterator = iter(valid_dataloader) if dl_type == 'single' \
+                              else cyclic_generator(train_dataloader, args.global_batch_size)
+        else:
+            valid_data_iterator = None
 
-    if valid_dataloader is not None:
-        valid_data_iterator = iter(valid_dataloader) if dl_type == 'single' \
-                              else iter(cyclic_iter(valid_dataloader))
-    else:
-        valid_data_iterator = None
+        if test_dataloader is not None:
+            test_data_iterator = iter(test_dataloader) if dl_type == 'single' \
+                             else cyclic_generator(train_dataloader, args.global_batch_size)
+        else:
+            test_data_iterator = None
 
-    if test_dataloader is not None:
-        test_data_iterator = iter(test_dataloader) if dl_type == 'single' \
-                             else iter(cyclic_iter(test_dataloader))
     else:
-        test_data_iterator = None
+        if train_dataloader is not None:
+            train_data_iterator = iter(train_dataloader) if dl_type == 'single' \
+                                else iter(cyclic_iter(train_dataloader))
+        else:
+            train_data_iterator = None
+
+        if valid_dataloader is not None:
+            valid_data_iterator = iter(valid_dataloader) if dl_type == 'single' \
+                                else iter(cyclic_iter(valid_dataloader))
+        else:
+            valid_data_iterator = None
+
+        if test_dataloader is not None:
+            test_data_iterator = iter(test_dataloader) if dl_type == 'single' \
+                                else iter(cyclic_iter(test_dataloader))
+        else:
+            test_data_iterator = None
 
     return train_data_iterator, valid_data_iterator, test_data_iterator
