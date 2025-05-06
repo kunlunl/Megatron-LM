@@ -41,6 +41,7 @@ def build_tokenizer(args):
         assert args.vocab_size is not None
         tokenizer = _NullTokenizer(args.vocab_size)
     elif args.tokenizer_type == 'NullTokenizerSft':
+    elif args.tokenizer_type == 'NullTokenizerSft':
         tokenizer = _NullTokenizerNotPlusOne(args.tokenizer_model)
     elif args.tokenizer_type == 'NullTokenizerPlusOne':
         tokenizer = _NullTokenizerPlusOne(args.tokenizer_model)    
@@ -557,10 +558,18 @@ class _NullTokenizer:
 
 class _NullTokenizerNotPlusOne:
     def __init__(self, tokenizer_model):
-        self.tokenizer = LlamaTokenizerCSharp.from_pretrained(tokenizer_model, add_bos_token=False, add_eos_token=False)
-        self.pad_token_id = self.tokenizer.pad_token_id
-        self._eos_id = self.tokenizer.vocab_size - 1
-        self.vocab_size = self.tokenizer.vocab_size
+        if tokenizer_model is None:
+            # self.tokenizer = LlamaTokenizerCSharp.from_pretrained(tokenizer_model, add_bos_token=False, add_eos_token=False)
+            self.pad_token_id=127832
+            self._eos_id=127999
+            self.vocab_size=128000
+            print("tokenizer_model is None")
+        else:
+            self.tokenizer = LlamaTokenizerCSharp.from_pretrained(tokenizer_model, add_bos_token=False, add_eos_token=False)
+            self.pad_token_id = self.tokenizer.pad_token_id
+            self._eos_id = self.tokenizer.vocab_size - 1
+            self.vocab_size = self.tokenizer.vocab_size
+
 
     def tokenize(self, text):
         return [int(x) for x in text.split(' ')]
