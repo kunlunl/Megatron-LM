@@ -7,7 +7,7 @@ set -euo pipefail
 TS=`date +%Y_%m_%d_%H_%M_%S`
 
 DATA_PATH=/m2v_model/wuguohao03/nv_teamwork/Megatron-Kwai/dataset/github_subset_1.csv
-TOKENIZER=/nlp_group/liupeng15/toxiansheng/tokenizer.128k.data_ratio/
+# TOKENIZER=/nlp_group/liupeng15/toxiansheng/tokenizer.128k.data_ratio/
 TRAIN_ITERS=200
 
 if [ $GQA == "1" ]; then
@@ -66,12 +66,12 @@ DATA_ARGS="
     --data-impl mock \
     --train-data-path $DATA_PATH \
     --tokenizer-type NullTokenizerSft \
-    --tokenizer-model $TOKENIZER \
     --dataloader-type cyclic \
     --variable-seq-lengths \
     --vocab-size 32004 \
     --split 949,50,1
 "
+# --tokenizer-model $TOKENIZER \
 # --sft-concat-mbs1 \
 
 OUTPUT_ARGS="
