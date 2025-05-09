@@ -239,7 +239,7 @@ class MegatronOptimizer(ABC):
         return self.get_loss_scale() * loss
 
     @abstractmethod
-    def reload_model_params(self):
+    def reload_model_params(self, state_dict=None):
         """Refreshes any internal state from the current model parameters.
         Call whenever the parameters are changed outside of the optimizer.
         For example, when we load a model from a checkpoint  without loading
@@ -434,9 +434,9 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
             return self._scale_one
         return self.grad_scaler.scale
 
-    def reload_model_params(self):
+    def reload_model_params(self, state_dict=None):
         if self.param_groups:
-            self._copy_model_params_to_main_params()
+            self._copy_model_params_to_main_params(state_dict=state_dict)
 
     def _unscale_main_grads_and_check_for_nan(self):
 
@@ -720,7 +720,8 @@ class Float16OptimizerWithFloat16Params(MixedPrecisionOptimizer):
             this=main_data, that=model_data, overflow_buf=self._dummy_overflow_buf
         )
 
-    def _copy_model_params_to_main_params(self):
+    def _copy_model_params_to_main_params(self, state_dict=None):
+        assert state_dict is None, "Initialize main params from state dict is not supported"
         # Only needed for the float16 params.
         model_data, main_data = self._get_model_and_main_params_data_float16()
         _multi_tensor_copy_this_to_that(
@@ -934,7 +935,7 @@ class FP32Optimizer(MegatronOptimizer):
         # No overflow for FP32 optimizer.
         return success, grad_norm, num_zeros_in_grad
 
-    def reload_model_params(self):
+    def reload_model_params(self, state_dict=None):
         pass
 
     def state_dict(self):
@@ -1083,9 +1084,9 @@ class ChainedOptimizer(MegatronOptimizer):
         else:
             return torch.tensor([1.0], dtype=torch.float32, device=torch.cuda.current_device())
 
-    def reload_model_params(self):
+    def reload_model_params(self, state_dict=None):
         for optimizer in self.chained_optimizers:
-            optimizer.reload_model_params()
+            optimizer.reload_model_params(state_dict=state_dict)
 
     def state_dict(self):
         if len(self.chained_optimizers) == 1:

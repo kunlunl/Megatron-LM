@@ -2098,7 +2098,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
 
                 shard_param_buffer.copy_(shard_main_param)
 
-    def _copy_model_params_to_main_params(self):
+    def _copy_model_params_to_main_params(self, state_dict=None):
         """
         Copy model params to main params.
 
@@ -2120,6 +2120,20 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         if self.config.use_precision_aware_optimizer_no_fp8_or_ds_fp8:
             return
 
+        if state_dict is not None:
+            model_param_to_state_dict_param_map = {}
+            names_in_state_dict = set(state_dict.keys())
+            for model_chunk in self.model_chunks:
+                for name, model_param in model_chunk.named_parameters():
+                    matched_keys = [k for k in names_in_state_dict if k in name]
+                    assert (
+                        len(matched_keys) == 1
+                    ), f"Parameter {name} has {len(matched_keys)} matches in state dict"
+                    state_dict_param = state_dict[matched_keys[0]]
+                    assert model_param.shape == state_dict_param.shape
+                    model_param_to_state_dict_param_map[model_param] = state_dict_param
+                    names_in_state_dict.remove(matched_keys[0])
+
         # Utility method for copying group params.
         def copy_group_params(model_groups, shard_main_groups):
             for model_group, shard_main_group in zip(model_groups, shard_main_groups):
@@ -2128,6 +2142,10 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     param_range_map = self._get_model_param_range_map(model_param)
                     param_range = param_range_map["param"]
                     assert param_range.size == shard_main_param.nelement()
+
+                    if state_dict is not None:
+                        # Use param from state_dict to initialize main_param
+                        model_param = model_param_to_state_dict_param_map[model_param]
 
                     if is_float8tensor(model_param):
                         shard_model_param = dequantize_fp8_tensor(model_param).view(-1)[
