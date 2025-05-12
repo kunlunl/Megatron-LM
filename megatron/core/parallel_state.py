@@ -257,7 +257,7 @@ def initialize_model_parallel(
             _CONTEXT_PARALLEL_GROUP_SLOW_DICT = {}
             _CONTEXT_PARALLEL_GROUP_LOCAL_DICT = {}
             _MPU_CONTEXT_PARALLEL_ALL_POSSIBLE_WORLD_SIZES = []
-            _MPU_CONTEXT_PARALLEL_WORLD_SIZE = context_parallel_size # TODO(kunlunl): Remove this initial value?
+            _MPU_CONTEXT_PARALLEL_WORLD_SIZE = context_parallel_size
             _context_parallel_size = 1
             while _context_parallel_size <= data_parallel_size:
                 (

@@ -533,8 +533,8 @@ class ParallelAttention(MegatronModule):
         self.attn_mask_type = attn_mask_type
         self.params_dtype = args.params_dtype
         self.sequence_parallel = args.sequence_parallel
-        self.cp_overlap = args.context_parallel_comm_overlap_gemm # TODO(kunlunl): Is this correct?
-        self.cp_offload_mode = args.kaimm_cp_offload_mode # TODO(kunlunl): Don't need to handle this?
+        self.cp_overlap = args.context_parallel_comm_overlap_gemm # Move the cp_size judgment to forward()
+        self.cp_offload_mode = args.kaimm_cp_offload_mode # Move the cp_size judgment to forward()
         self.use_fast_rope = args.use_fast_rope
         self.sft_padding = args.sft_padding
         self.sft_concat = args.sft_concat
@@ -595,7 +595,6 @@ class ParallelAttention(MegatronModule):
                 **_args_to_kwargs())
         else:
             assert attention_type == AttnType.cross_attn
-            assert mpu.get_context_parallel_world_size() == 1, "context parallel does not support cross attention" # TODO(kunlunl): Check if it's correct
 
             if self.group_query_attention:
                 raise NotImplementedError("Grouped query attention not implemented for cross-attention.")
@@ -732,6 +731,8 @@ class ParallelAttention(MegatronModule):
                 # [sq, b, ng, np/ng * hn] -> [sq, b, np, hn] -
                 query_layer = query_layer.reshape(query_layer.size(0), query_layer.size(1), -1, self.hidden_size_per_attention_head)  # TODO: there is a layout transform if ng != 1
         else:
+            assert mpu.get_context_parallel_world_size() == 1, "context parallel does not support cross attention"
+
             # Attention heads [sk, b, h] --> [sk, b, (np * 2 * hn)]
             mixed_kv_layer, _ = self.key_value(encoder_output)
 

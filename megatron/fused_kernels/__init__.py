@@ -94,7 +94,7 @@ def load(args):
     # Context parallel.
     # =================
 
-    # TODO(kunlunl): Make it always be True?
+    # Make it always be True because we don't know whether cp will be used
     if True:
         extra_cuda_flags = []
 

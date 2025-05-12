@@ -879,7 +879,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         data_parallel_rank = mpu.get_data_parallel_rank()
         data_parallel_world_size = mpu.get_data_parallel_world_size()
         data_parallel_group = mpu.get_data_parallel_group()
-        context_parallel_world_size = mpu.get_context_parallel_world_size() # TODO(kunlunl): Check if it's correct
+        context_parallel_world_size = mpu.get_context_parallel_world_size()
 
         # Scale grad buffers by '1 / data_parallel_world_size'.
         for model in self.models:
