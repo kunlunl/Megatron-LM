@@ -475,6 +475,8 @@ def set_virtual_pipeline_model_parallel_world_size(world_size):
 def set_context_parallel_world_size(world_size):
     """Set the context parallel size"""
     global _MPU_CONTEXT_PARALLEL_WORLD_SIZE
+    assert world_size in _MPU_CONTEXT_PARALLEL_ALL_POSSIBLE_WORLD_SIZES, \
+        f'context parallel world size {world_size} is not allowed'
     _MPU_CONTEXT_PARALLEL_WORLD_SIZE = world_size
 
 
@@ -496,7 +498,8 @@ def get_pipeline_model_parallel_world_size():
 
 def get_context_parallel_all_possible_world_sizes():
     """Return all possible world sizes for the context parallel group."""
-    assert _MPU_CONTEXT_PARALLEL_ALL_POSSIBLE_WORLD_SIZES is not None, 'context parallel all possible world sizes is not initialized'
+    assert _MPU_CONTEXT_PARALLEL_ALL_POSSIBLE_WORLD_SIZES is not None, \
+        'context parallel all possible world sizes is not initialized'
     return _MPU_CONTEXT_PARALLEL_ALL_POSSIBLE_WORLD_SIZES
 
 
