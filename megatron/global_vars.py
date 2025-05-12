@@ -39,9 +39,9 @@ def get_current_global_batch_size():
     return _GLOBAL_NUM_MICROBATCHES_CALCULATOR.get_current_global_batch_size()
 
 
-def update_num_microbatches(consumed_samples, consistency_check=True):
-    _GLOBAL_NUM_MICROBATCHES_CALCULATOR.update(consumed_samples,
-                                               consistency_check)
+def update_num_microbatches(consumed_samples):
+    _GLOBAL_NUM_MICROBATCHES_CALCULATOR.update(consumed_samples)
+
 
 def push_cached_num_microbatches(incoming_num_micro_batch):
     assert isinstance(_GLOBAL_NUM_MICROBATCHES_CALCULATOR, CachedNumMicroBatches)

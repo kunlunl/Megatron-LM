@@ -19,10 +19,6 @@ def build_num_microbatches_calculator(args):
         num_microbatches_calculator = ConstantNumMicroBatches(
             args.global_batch_size, args.micro_batch_size, args.data_parallel_size,
         )
-        # TODO(kunlunl): Cannot print this log because cp is not initialized yet, should be removed?
-        # if args.rank == 0:
-        #     print('setting number of micro-batches to constant {}'.format(
-        #         num_microbatches_calculator.get()), flush=True)
 
     else:
         assert len(args.rampup_batch_size) == 3, 'expected the following ' \
@@ -72,7 +68,7 @@ class NumMicroBatchesCalculator(ABC):
         return self.current_global_batch_size
 
     @abstractmethod
-    def update(self, consumed_samples, consistency_check):
+    def update(self, consumed_samples):
         pass
 
 
@@ -83,7 +79,7 @@ class ConstantNumMicroBatches(NumMicroBatchesCalculator):
         self.data_parallel_size = data_parallel_size
         self.current_global_batch_size = global_batch_size
 
-    def update(self, consumed_samples, consistency_check):
+    def update(self, consumed_samples):
         pass
 
 class CachedNumMicroBatches(NumMicroBatchesCalculator):
@@ -92,13 +88,12 @@ class CachedNumMicroBatches(NumMicroBatchesCalculator):
         self.num_micro_batches_queue = None
         self.device = device
         self.dtype = dtype
-        # self.num_samples_global_batch_queue = deque()
         self.num_micro_batches = None
 
     def get(self):
         return self.num_micro_batches
 
-    def update(self, consumed_samples, consistency_check):
+    def update(self, consumed_samples):
         pass
 
     def update_cache(self, incoming_num_micro_batch):
@@ -169,9 +164,9 @@ class RampupBatchsizeNumMicroBatches(NumMicroBatchesCalculator):
         self.rampup_samples_per_increment = self.ramup_samples / num_increments
 
         # Initialize number of microbatches.
-        self.update(0, False)
+        self.update(0)
 
-    def update(self, consumed_samples, consistency_check):
+    def update(self, consumed_samples):
 
         if consumed_samples > self.ramup_samples:
             self.current_global_batch_size = self.global_batch_size
