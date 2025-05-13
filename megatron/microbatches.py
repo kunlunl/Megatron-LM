@@ -85,7 +85,7 @@ class ConstantNumMicroBatches(NumMicroBatchesCalculator):
 class CachedNumMicroBatches(NumMicroBatchesCalculator):
 
     def __init__(self, device="cuda", dtype=torch.int64):
-        self.num_micro_batches_queue = None
+        self.num_micro_batches_and_cp_size_queue = None
         self.device = device
         self.dtype = dtype
         self.num_micro_batches = None
@@ -96,30 +96,42 @@ class CachedNumMicroBatches(NumMicroBatchesCalculator):
     def update(self, consumed_samples):
         pass
 
-    def update_cache(self, incoming_num_micro_batch):
-        if self.num_micro_batches_queue is None:
-            self.num_micro_batches_queue = deque()
-        self.num_micro_batches_queue.append(incoming_num_micro_batch)
+    def update_cache(self, incoming_num_micro_batch, incoming_cp_size):
+        if self.num_micro_batches_and_cp_size_queue is None:
+            self.num_micro_batches_and_cp_size_queue = deque()
+        self.num_micro_batches_and_cp_size_queue.append((incoming_num_micro_batch, incoming_cp_size))
 
     def step(self, process_group=None):
         # -1 means no num microbathes will be pushed by this rank
         num_micro_batches = -1
-        if self.num_micro_batches_queue is not None:
-            num_micro_batches = self.num_micro_batches_queue.popleft()
+        cp_size = -1
+        if self.num_micro_batches_and_cp_size_queue is not None:
+            num_micro_batches, cp_size = self.num_micro_batches_and_cp_size_queue.popleft()
             assert num_micro_batches > 0
-        num_micro_batches = torch.tensor(num_micro_batches, dtype=self.dtype, device=self.device)
+            assert cp_size > 0
+        num_micro_batches_and_cp_size = torch.tensor([num_micro_batches, cp_size], dtype=self.dtype, device=self.device)
 
-        comm_buffer = torch.empty(dist.get_world_size(process_group), dtype=self.dtype, device=self.device)
+        comm_buffer = torch.empty([dist.get_world_size(process_group), 2], dtype=self.dtype, device=self.device)
 
         dist.all_gather_into_tensor(comm_buffer,
-                                    num_micro_batches,
+                                    num_micro_batches_and_cp_size,
                                     group=process_group)
 
-        num_micro_batches_set = set([num for num in comm_buffer.tolist() if num != -1])
+        num_micro_batches_buffer = comm_buffer[:, 0].contiguous()
+        cp_size_buffer = comm_buffer[:, 1].contiguous()
 
+        num_micro_batches_set = set([num for num in num_micro_batches_buffer.tolist() if num != -1])
         assert len(num_micro_batches_set) == 1, f"Expect unique number of microbatches, got {num_micro_batches}, please check data sampler for this inconsistency."
-
         self.num_micro_batches = num_micro_batches_set.pop()
+        
+        cp_size_set = set([num for num in cp_size_buffer.tolist() if num != -1])
+        assert len(cp_size_set) == 1, f"Expect unique cp size, got {cp_size_set}, please check data sampler for this inconsistency."
+        cp_size = cp_size_set.pop()
+        assert cp_size > 0
+
+        from megatron.core import mpu # Avoid circular import
+        print(f"Set cp_size to {cp_size}")
+        mpu.set_context_parallel_world_size(cp_size)
 
 
 class RampupBatchsizeNumMicroBatches(NumMicroBatchesCalculator):

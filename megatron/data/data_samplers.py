@@ -184,7 +184,7 @@ class SampleConcatDataCollatorForSupervisedDataset(object):
 
         for more details, please refer to fused_kernels/fast_flip_cuda.cu:flip
         '''
-        divisor = math.lcm(4, mpu.get_tensor_model_parallel_world_size()) * 2 * mpu.get_context_parallel_world_size()
+        divisor = np.lcm(4, mpu.get_tensor_model_parallel_world_size()) * 2 * mpu.get_context_parallel_world_size()
 
         all_input_ids = []
         all_label_mask = []
@@ -364,10 +364,23 @@ class SftConcatWithinBatchSampler:
         return [entry[1] for entry in list(buckets)], max([bucket[0] for bucket in buckets])
 
     def search_for_buckets(self, batch: List[int]):
+        # TODO(kunlunl): Remove this.
+        # Need to replace with real scheduler logic.
+        current_cp_size = mpu.get_context_parallel_world_size()
+        possible_cp_sizes = mpu.get_context_parallel_all_possible_world_sizes()
+        for i, cp_size in enumerate(possible_cp_sizes):
+            if cp_size == current_cp_size:
+                break
+        next_cp_size = possible_cp_sizes[(i + 1) % len(possible_cp_sizes)]
+        print("next_cp_size:", next_cp_size)
+
+        dp_for_sample_rank = mpu.get_data_parallel_rank() // next_cp_size
+        dp_for_sample_size = mpu.get_data_parallel_world_size() // next_cp_size
+
         lengths = self.dataset_sizes[batch]
         one_sample_per_bucket = get_args().sft_concat_mbs1
         i = 0
-        assert max(lengths) <= self.max_seq_len, f"dp sample rank: {mpu.get_data_parallel_for_sample_rank()}: Maximum sequence length in this batch of samples exceeds max_seq_len requirement."
+        assert max(lengths) <= self.max_seq_len, f"dp sample rank: {dp_for_sample_rank}: Maximum sequence length in this batch of samples exceeds max_seq_len requirement."
         while(True):
             i += 1
             if one_sample_per_bucket:
@@ -375,17 +388,17 @@ class SftConcatWithinBatchSampler:
                 indices_buckets, max_bucket_sum = self.solver(lengths, num_buckets)
                 break
             else:
-                num_buckets = i * mpu.get_data_parallel_for_sample_world_size() * mpu.get_pipeline_model_parallel_world_size()
+                num_buckets = i * dp_for_sample_size * mpu.get_pipeline_model_parallel_world_size()
                 indices_buckets, max_bucket_sum = self.solver(lengths, num_buckets)
                 if max_bucket_sum <= self.max_seq_len:
                     break
-        num_local_buckets = len(indices_buckets) // mpu.get_data_parallel_for_sample_world_size()
-        start_idx = mpu.get_data_parallel_for_sample_rank() * num_local_buckets
+        num_local_buckets = len(indices_buckets) // dp_for_sample_size
+        start_idx = dp_for_sample_rank * num_local_buckets
         end_idx = start_idx + num_local_buckets
         local_micro_batches = [[batch[idx] for idx in indices] for indices in indices_buckets[start_idx:end_idx]]
         num_samples_global_micro_batch = [sum(len(local_micro_batches) for local_micro_batches in indices_buckets[i::num_local_buckets]) for i in range(0, num_local_buckets)]
         assert len(local_micro_batches) == len(num_samples_global_micro_batch)
-        return local_micro_batches, num_samples_global_micro_batch
+        return local_micro_batches, num_samples_global_micro_batch, next_cp_size
 
     # pre-determine sample arrangement within minibatch and number of micro batch 
     def predetermine_within_minibatch(self):
@@ -410,13 +423,13 @@ class SftConcatWithinBatchSampler:
 
         if len(batch) == self.global_batch_size or (len(batch) > 0 and not self.drop_last):
             # 根据样本长度搜索桶（buckets）
-            micro_batches, num_samples_global_micro_batch = self.search_for_buckets(batch)
+            micro_batches, num_samples_global_micro_batch, next_cp_size = self.search_for_buckets(batch)
             self.micro_batches_queue = micro_batches
             self.num_micro_batch = len(micro_batches)
             self.num_samples_global_micro_batch_queue = num_samples_global_micro_batch
             assert self.num_micro_batch == len(self.num_samples_global_micro_batch_queue)
             if mpu.is_pipeline_last_stage():
-                push_cached_num_microbatches(self.num_micro_batch)
+                push_cached_num_microbatches(self.num_micro_batch, next_cp_size)
         else:
             # 当前 epoch 没有更多批次
             self.micro_batches_queue = []

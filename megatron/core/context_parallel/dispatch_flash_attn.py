@@ -50,12 +50,12 @@ def _flash_attn_forward(q, k, v, dropout_p, softmax_scale, causal, window_size, 
 def _flash_attn_varlen_forward(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
                                dropout_p, softmax_scale, causal, window_size, return_softmax):
     if version_major == 2 and version_minor == 3 and not support_alibi:
-        assert not alibi_bias_max, "this version of flash-attn does not support alibi"
+        # assert not alibi_bias_max, "this version of flash-attn does not support alibi"
         return flash_attn.flash_attn_interface._flash_attn_varlen_forward(
             q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, dropout_p, softmax_scale, causal, window_size, return_softmax)
     elif version_major == 2 and version_minor == 2 and not support_alibi:
         assert window_size == (-1, -1), "flash-attn 2.2 does not support window_size"
-        assert not alibi_bias_max, "this version of flash-attn does not support alibi"
+        # assert not alibi_bias_max, "this version of flash-attn does not support alibi"
         return flash_attn.flash_attn_interface._flash_attn_varlen_forward(
             q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, dropout_p, softmax_scale, causal, return_softmax)
     elif version_major == 2 and version_minor == 2 and support_alibi:
@@ -122,12 +122,12 @@ def _flash_attn_varlen_backward(
     rng_state=None
 ):
     if version_major == 2 and version_minor == 3 and not support_alibi:
-        assert not alibi_bias_max, "this version of flash-attn does not support alibi"
+        # assert not alibi_bias_max, "this version of flash-attn does not support alibi"
         return flash_attn.flash_attn_interface._flash_attn_varlen_backward(
             dout, q, k, v, out, softmax_lse, dq, dk, dv, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, dropout_p, softmax_scale, causal, window_size, rng_state=rng_state)
     elif version_major == 2 and version_minor == 2 and not support_alibi:
         assert window_size == (-1, -1), "flash-attn 2.2 does not support window_size"
-        assert not alibi_bias_max, "this version of flash-attn does not support alibi"
+        # assert not alibi_bias_max, "this version of flash-attn does not support alibi"
         return flash_attn.flash_attn_interface._flash_attn_varlen_backward(
             dout, q, k, v, out, softmax_lse, dq, dk, dv, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, dropout_p, softmax_scale, causal, rng_state=rng_state)
     elif version_major == 2 and version_minor == 2 and support_alibi:

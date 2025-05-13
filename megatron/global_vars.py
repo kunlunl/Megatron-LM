@@ -43,9 +43,9 @@ def update_num_microbatches(consumed_samples):
     _GLOBAL_NUM_MICROBATCHES_CALCULATOR.update(consumed_samples)
 
 
-def push_cached_num_microbatches(incoming_num_micro_batch):
+def push_cached_num_microbatches(incoming_num_micro_batch, incoming_cp_size):
     assert isinstance(_GLOBAL_NUM_MICROBATCHES_CALCULATOR, CachedNumMicroBatches)
-    _GLOBAL_NUM_MICROBATCHES_CALCULATOR.update_cache(incoming_num_micro_batch)
+    _GLOBAL_NUM_MICROBATCHES_CALCULATOR.update_cache(incoming_num_micro_batch, incoming_cp_size)
 
 
 def step_cached_num_microbatches(process_group=None):

@@ -36,7 +36,7 @@ def flip_cp(x, dim, world_size):
     return o
 
 
-@torch.compile(dynamic=True)
+# @torch.compile(dynamic=True)
 def mul_floordiv(x, multiplier, divisor):
     return x * multiplier // divisor
 
