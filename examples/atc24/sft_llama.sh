@@ -6,7 +6,7 @@ set -euo pipefail
 
 TS=`date +%Y_%m_%d_%H_%M_%S`
 
-DATA_PATH=/m2v_model/wuguohao03/nv_teamwork/Megatron-Kwai/dataset/github_subset_1.csv
+DATA_PATH=/workspace/hot-switch/Megatron-LM/dataset/github_subset_1.csv
 # TOKENIZER=/nlp_group/liupeng15/toxiansheng/tokenizer.128k.data_ratio/
 TRAIN_ITERS=200
 
@@ -127,6 +127,7 @@ mpirun --allow-run-as-root \
     --num-layers-per-virtual-pipeline-stage $PP_l \
     --overlap-p2p-communication \
     --context-parallel-size $CP \
+    --all-possible-context-parallel-sizes $ALL_CP \
     $CKPT_ARGS \
     $TP_OVERLAP_ARGS \
     --kaimm-overlap-cp-slow-ctas 4 \

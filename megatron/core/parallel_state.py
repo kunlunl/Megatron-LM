@@ -182,6 +182,19 @@ def initialize_model_parallel(
 
     rank = torch.distributed.get_rank()
 
+    global _MPU_CONTEXT_PARALLEL_WORLD_SIZE
+    global _MPU_CONTEXT_PARALLEL_ALL_POSSIBLE_WORLD_SIZES
+    _MPU_CONTEXT_PARALLEL_WORLD_SIZE = context_parallel_size
+    _MPU_CONTEXT_PARALLEL_ALL_POSSIBLE_WORLD_SIZES = []
+    if all_possible_context_parallel_sizes is None:
+        all_possible_context_parallel_sizes = [context_parallel_size]
+    for _context_parallel_size in all_possible_context_parallel_sizes:
+        assert _context_parallel_size <= data_parallel_size, \
+            'context_parallel_size {} is greater than data_parallel_size {}'.format(_context_parallel_size, data_parallel_size)
+        assert (_context_parallel_size & (_context_parallel_size - 1)) == 0, \
+            'context_parallel_size {} is not a power of 2'.format(_context_parallel_size)
+        _MPU_CONTEXT_PARALLEL_ALL_POSSIBLE_WORLD_SIZES.append(_context_parallel_size)
+
     # Build the data-parallel groups.
     global _DATA_PARALLEL_GROUP
     global _DATA_PARALLEL_GROUP_GLOO
@@ -190,9 +203,10 @@ def initialize_model_parallel(
     global _CONTEXT_PARALLEL_GROUP_DICT
     global _CONTEXT_PARALLEL_GROUP_SLOW_DICT
     global _CONTEXT_PARALLEL_GROUP_LOCAL_DICT
-    global _MPU_CONTEXT_PARALLEL_WORLD_SIZE
-    global _MPU_CONTEXT_PARALLEL_ALL_POSSIBLE_WORLD_SIZES
     assert _CONTEXT_PARALLEL_GROUP_DICT is None, 'context parallel group is already initialized'
+    _CONTEXT_PARALLEL_GROUP_DICT = {}
+    _CONTEXT_PARALLEL_GROUP_SLOW_DICT = {}
+    _CONTEXT_PARALLEL_GROUP_LOCAL_DICT = {}
     all_data_parallel_group_ranks = []
     for i in range(pipeline_model_parallel_size):
         start_rank = i * num_pipeline_model_parallel_groups
@@ -206,12 +220,8 @@ def initialize_model_parallel(
                 _DATA_PARALLEL_GROUP = group
                 _DATA_PARALLEL_GROUP_GLOO = group_gloo
                 _DATA_PARALLEL_GLOBAL_RANKS = ranks
-
-            def _build_context_parallel_group(_context_parallel_size):
+            for _context_parallel_size in all_possible_context_parallel_sizes:
                 assert data_parallel_size % _context_parallel_size == 0, f"{data_parallel_size} % {_context_parallel_size} != 0"
-                context_parallel_group = None
-                context_parallel_group_slow = None
-                context_parallel_group_local = None
                 for k in range(data_parallel_size // _context_parallel_size):
                     ranks = range(
                         start_rank + j + k * (tensor_model_parallel_size * _context_parallel_size),
@@ -220,7 +230,7 @@ def initialize_model_parallel(
                     )
                     group = torch.distributed.new_group(ranks)
                     if rank in ranks:
-                        context_parallel_group = group
+                        _CONTEXT_PARALLEL_GROUP_DICT[_context_parallel_size] = group
                     if _context_parallel_size >= 2:
                         assert kaimm_cp_offload_mode in [0, 1, 2]
                         if kaimm_cp_offload_mode == 0:
@@ -230,7 +240,7 @@ def initialize_model_parallel(
                                 opt_slow.config.min_ctas = opt_slow.config.max_ctas = kaimm_overlap_cp_slow_ctas
                             group_slow = torch.distributed.new_group(ranks, pg_options=opt_slow)
                             if rank in ranks:
-                                context_parallel_group_slow = group_slow
+                                _CONTEXT_PARALLEL_GROUP_SLOW_DICT[_context_parallel_size] = group_slow
                         else:
                             if kaimm_cp_offload_mode == 1:
                                 local_device_count = min(torch.cuda.device_count(), tensor_model_parallel_size)
@@ -246,36 +256,8 @@ def initialize_model_parallel(
                                 ranks_local = ranks[local_start_idx:local_end_idx]
                                 group_local = torch.distributed.new_group(ranks_local)
                                 if rank in ranks_local:
-                                    context_parallel_group_local = group_local
+                                    _CONTEXT_PARALLEL_GROUP_LOCAL_DICT[_context_parallel_size] = group_local
                                 local_start_idx = local_end_idx
-                return (
-                    context_parallel_group,
-                    context_parallel_group_slow,
-                    context_parallel_group_local,
-                )
-
-            _CONTEXT_PARALLEL_GROUP_DICT = {}
-            _CONTEXT_PARALLEL_GROUP_SLOW_DICT = {}
-            _CONTEXT_PARALLEL_GROUP_LOCAL_DICT = {}
-            _MPU_CONTEXT_PARALLEL_ALL_POSSIBLE_WORLD_SIZES = []
-            _MPU_CONTEXT_PARALLEL_WORLD_SIZE = context_parallel_size
-            if all_possible_context_parallel_sizes is None:
-                all_possible_context_parallel_sizes = [context_parallel_size]
-
-            for _context_parallel_size in all_possible_context_parallel_sizes:
-                assert _context_parallel_size <= data_parallel_size, \
-                    'context_parallel_size {} is greater than data_parallel_size {}'.format(_context_parallel_size, data_parallel_size)
-                assert (_context_parallel_size & (_context_parallel_size - 1)) == 0, \
-                    'context_parallel_size {} is not a power of 2'.format(_context_parallel_size)
-                (
-                    context_parallel_group,
-                    context_parallel_group_slow,
-                    context_parallel_group_local,
-                ) = _build_context_parallel_group(_context_parallel_size)
-                _CONTEXT_PARALLEL_GROUP_DICT[_context_parallel_size] = context_parallel_group
-                _CONTEXT_PARALLEL_GROUP_SLOW_DICT[_context_parallel_size] = context_parallel_group_slow
-                _CONTEXT_PARALLEL_GROUP_LOCAL_DICT[_context_parallel_size] = context_parallel_group_local
-                _MPU_CONTEXT_PARALLEL_ALL_POSSIBLE_WORLD_SIZES.append(_context_parallel_size)
 
     # Build the model-parallel groups.
     global _MODEL_PARALLEL_GROUP

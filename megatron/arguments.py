@@ -1066,8 +1066,8 @@ def _add_distributed_args(parser):
                        help='Degree of pipeline model parallelism.')
     group.add_argument('--context-parallel-size', type=int, default=1,
                        help='Degree of context parallelism.')
-    group.add_argument('--all-possible-context-parallel-sizes', nargs='+', type=int, default=None,
-                       help='All possible context parallel sizes.')
+    group.add_argument('--all-possible-context-parallel-sizes', type=lambda s: list(map(int, s.split(','))), 
+                       default=None, help='All possible context parallel sizes.')
     group.add_argument('--pipeline-model-parallel-split-rank',
                        type=int, default=None,
                        help='Rank where encoder and decoder should be split.')
