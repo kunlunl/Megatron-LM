@@ -102,6 +102,18 @@ def validate_args(args, defaults={}):
                     ' to be less than pipeline model parallel size ({})'.format(
                             args.pipeline_model_parallel_size)
 
+    if args.all_possible_context_parallel_sizes is None:
+        args.all_possible_context_parallel_sizes = [args.context_parallel_size]
+    else:
+        assert args.context_parallel_size in args.all_possible_context_parallel_sizes, \
+            'context_parallel_size {} is not in all_possible_context_parallel_sizes {}'.format(
+                args.context_parallel_size, args.all_possible_context_parallel_sizes)
+        unique_context_parallel_sizes = []
+        for cp_size in args.all_possible_context_parallel_sizes:
+            if cp_size not in unique_context_parallel_sizes:
+                unique_context_parallel_sizes.append(cp_size)
+        args.all_possible_context_parallel_sizes = unique_context_parallel_sizes
+
     # Deprecated arguments
     assert args.batch_size is None, '--batch-size argument is no longer ' \
         'valid, use --micro-batch-size instead'
@@ -1054,6 +1066,8 @@ def _add_distributed_args(parser):
                        help='Degree of pipeline model parallelism.')
     group.add_argument('--context-parallel-size', type=int, default=1,
                        help='Degree of context parallelism.')
+    group.add_argument('--all-possible-context-parallel-sizes', nargs='+', type=int, default=None,
+                       help='All possible context parallel sizes.')
     group.add_argument('--pipeline-model-parallel-split-rank',
                        type=int, default=None,
                        help='Rank where encoder and decoder should be split.')

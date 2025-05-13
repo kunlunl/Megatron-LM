@@ -50,7 +50,10 @@ def build_pretraining_data_loader(dataset, consumed_samples):
             consumed_samples=consumed_samples,
             micro_batch_size=args.micro_batch_size)
     elif args.dataloader_type == 'cyclic':
-        raise Exception('cyclic dataloader is not supported for hot-switch') # TODO(kunlunl): How to handle this case?
+        if len(args.all_possible_context_parallel_sizes) != 1:
+            # When context parallel changes, dp_for_sample also changes, so cannot calcuate the 
+            # last_batch_size, therefore cannot calculate epoch and current_epoch_samples.
+            raise NotImplementedError('Currently cyclic dataloader does not support hot-switch.')
         batch_sampler = MegatronPretrainingRandomSampler(
             dataset,
             total_samples=len(dataset),
@@ -82,17 +85,27 @@ def build_sft_data_loader(dataset):
 
     sft_concat = args.sft_concat
 
-    if args.dataloader_type == 'single':
+    if sft_concat:
+        print_rank_0("---------------------- using sample concat within batch sampler ----------------------")
+        batch_sampler = SftConcatWithinBatchSampler(dataset,
+            total_samples=len(dataset),
+            consumed_samples=0,
+            global_batch_size=args.global_batch_size,
+            dataset_sizes=dataset.sizes,
+            max_seq_len=args.seq_length)
+    elif args.dataloader_type == 'single':
         print_rank_0("---------------------- using distributed sampler ----------------------")
         batch_sampler = MegatronPretrainingSampler(
             total_samples=len(dataset),
             consumed_samples=0,
             micro_batch_size=args.micro_batch_size,
-            data_parallel_rank=mpu.get_data_parallel_for_sample_rank(),
-            data_parallel_size=mpu.get_data_parallel_for_sample_world_size(),
             sft_concat=sft_concat)
     elif args.dataloader_type == 'cyclic':
         print_rank_0("---------------------- using random distributed sampler ----------------------")
+        if len(args.all_possible_context_parallel_sizes) != 1:
+            # When context parallel changes, dp_for_sample also changes, so cannot calcuate the 
+            # last_batch_size, therefore cannot calculate epoch and current_epoch_samples.
+            raise NotImplementedError('Currently cyclic dataloader does not support hot-switch.')
         batch_sampler = MegatronSftRandomSampler(dataset,
                                                  total_samples=len(dataset),
                                                  consumed_samples=0,
@@ -105,19 +118,8 @@ def build_sft_data_loader(dataset):
         raise NotImplementedError
 
     if sft_concat:
-        print_rank_0("---------------------- using sample concat within batch sampler ----------------------")
-        batch_sampler = SftConcatWithinBatchSampler(dataset,
-            total_samples=len(dataset),
-            consumed_samples=0,
-            global_batch_size=args.global_batch_size,
-            dataset_sizes=dataset.sizes,
-            data_parallel_rank=mpu.get_data_parallel_for_sample_rank(),
-            data_parallel_size=mpu.get_data_parallel_for_sample_world_size(),
-            max_seq_len=args.seq_length
-            )
         print_rank_0("---------------------- using collate_fn for sample cncatenation ----------------------")
         collate_fn = SampleConcatDataCollatorForSupervisedDataset(tokenizer)
-
     elif args.sft_padding or args.micro_batch_size > 1:
         print_rank_0("---------------------- using collate_fn for padding ----------------------")
         assert args.seq_length % mpu.get_tensor_model_parallel_world_size() == 0
@@ -127,6 +129,7 @@ def build_sft_data_loader(dataset):
         collate_fn = DataCollatorForSupervisedDatasetWithOnlySP(tokenizer, mpu.get_tensor_model_parallel_world_size())
     else:
         collate_fn = None
+
     train_dataloader = torch.utils.data.DataLoader(dataset,
                                                    batch_sampler=batch_sampler,
                                                    collate_fn=collate_fn,
@@ -207,6 +210,7 @@ class SampleConcatDataCollatorForSupervisedDataset(object):
             label_mask=torch.as_tensor(np.expand_dims(label_mask, axis=0)),
             sample_lengths=torch.as_tensor(local_lengths)
         )
+
 
 @dataclass
 class DataCollatorForSupervisedDatasetWithOnlySP(object):
@@ -295,15 +299,15 @@ class MegatronPretrainingSampler:
             start_idx, end_idx = self.get_start_end_idx()
             yield batch[start_idx:end_idx]
 
+
 class SftConcatWithinBatchSampler:
 
     def __init__(self, dataset, total_samples, consumed_samples, global_batch_size, dataset_sizes,
-                 data_parallel_rank, data_parallel_size, max_seq_len: int = 4096, drop_last=True):
+                 max_seq_len: int = 4096, drop_last=True):
         self.dataset = dataset
         self.total_samples = total_samples  # 一个 epoch 的样本数
         self.consumed_samples = consumed_samples  # 全局已消耗的样本数
         self.global_batch_size = global_batch_size
-        self.data_parallel_rank = data_parallel_rank
         self.drop_last = drop_last
         self.name = "SftConcatWithinBatchSampler"
         self.dataset_sizes = dataset_sizes
@@ -336,10 +340,6 @@ class SftConcatWithinBatchSampler:
             'no samples left to consume: {}, {}'.format(self.consumed_samples,
                                                         self.total_samples)
         assert self.global_batch_size > 0
-        assert data_parallel_size > 0
-        assert self.data_parallel_rank < data_parallel_size, \
-            'data_parallel_rank should be smaller than data size: {}, ' \
-            '{}'.format(self.data_parallel_rank, data_parallel_size)
     
     def set_num_workers_times_prefech_factor(self, num_workers_times_prefech_factor):
         self.consumed_samples_backoff_queue = deque(maxlen=num_workers_times_prefech_factor)
@@ -558,6 +558,8 @@ class MegatronPretrainingRandomSampler:
                 self.consumed_samples += self.micro_batch_times_data_parallel_size
                 yield batch
                 batch = []
+
+
 class MegatronSftRandomSampler:
 
     def __init__(self, dataset, total_samples, consumed_samples, micro_batch_size,

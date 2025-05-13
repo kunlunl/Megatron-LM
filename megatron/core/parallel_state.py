@@ -4,7 +4,7 @@
 
 import os
 import torch
-from typing import Optional
+from typing import Optional, List
 
 from .utils import GlobalMemoryBuffer, GlobalTEUserBuffer
 
@@ -84,6 +84,7 @@ def initialize_model_parallel(
     use_fp8: bool = False,
     *,
     context_parallel_size: int = 1,
+    all_possible_context_parallel_sizes: Optional[List[int]] = None,
     kaimm_cp_offload_mode = None,
     kaimm_overlap_cp_slow_ctas = None,
     overlap_sp_ag = False,
@@ -258,8 +259,14 @@ def initialize_model_parallel(
             _CONTEXT_PARALLEL_GROUP_LOCAL_DICT = {}
             _MPU_CONTEXT_PARALLEL_ALL_POSSIBLE_WORLD_SIZES = []
             _MPU_CONTEXT_PARALLEL_WORLD_SIZE = context_parallel_size
-            _context_parallel_size = 1
-            while _context_parallel_size <= data_parallel_size:
+            if all_possible_context_parallel_sizes is None:
+                all_possible_context_parallel_sizes = [context_parallel_size]
+
+            for _context_parallel_size in all_possible_context_parallel_sizes:
+                assert _context_parallel_size <= data_parallel_size, \
+                    'context_parallel_size {} is greater than data_parallel_size {}'.format(_context_parallel_size, data_parallel_size)
+                assert (_context_parallel_size & (_context_parallel_size - 1)) == 0, \
+                    'context_parallel_size {} is not a power of 2'.format(_context_parallel_size)
                 (
                     context_parallel_group,
                     context_parallel_group_slow,
@@ -269,7 +276,6 @@ def initialize_model_parallel(
                 _CONTEXT_PARALLEL_GROUP_SLOW_DICT[_context_parallel_size] = context_parallel_group_slow
                 _CONTEXT_PARALLEL_GROUP_LOCAL_DICT[_context_parallel_size] = context_parallel_group_local
                 _MPU_CONTEXT_PARALLEL_ALL_POSSIBLE_WORLD_SIZES.append(_context_parallel_size)
-                _context_parallel_size *= 2
 
     # Build the model-parallel groups.
     global _MODEL_PARALLEL_GROUP

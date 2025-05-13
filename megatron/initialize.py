@@ -190,6 +190,7 @@ def _initialize_distributed():
                                            args.virtual_pipeline_model_parallel_size,
                                            args.pipeline_model_parallel_split_rank,
                                            context_parallel_size=args.context_parallel_size,
+                                           all_possible_context_parallel_sizes=args.all_possible_context_parallel_sizes,
                                            kaimm_cp_offload_mode=args.kaimm_cp_offload_mode,
                                            kaimm_overlap_cp_slow_ctas=args.kaimm_overlap_cp_slow_ctas,
                                            overlap_sp_ag=args.overlap_sp_ag, 
