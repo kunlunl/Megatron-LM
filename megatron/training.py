@@ -123,11 +123,12 @@ def pretrain(train_valid_test_dataset_provider,
     timers('train/valid/test-data-iterators-setup', log_level=0).start(
         barrier=True)
     if args.virtual_pipeline_model_parallel_size is not None:
-        all_data_iterators = [
-            build_train_valid_test_data_iterators(
-                train_valid_test_dataset_provider)
-            for _ in range(len(model))
-        ]
+        all_data_iterators = []
+        for i in range(len(model)):
+            mpu.set_virtual_pipeline_model_parallel_rank(i)
+            all_data_iterators.append(
+                build_train_valid_test_data_iterators(train_valid_test_dataset_provider)
+            )
         train_data_iterator = [data_iterators[0]
                                for data_iterators in all_data_iterators]
         valid_data_iterator = [data_iterators[1]
