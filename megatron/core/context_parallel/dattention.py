@@ -38,6 +38,12 @@ def flip_cp(x, dim, world_size):
 
 # @torch.compile(dynamic=True)
 def mul_floordiv(x, multiplier, divisor):
+    # TODO: Remove this
+    if isinstance(x, torch.Tensor) and x.dtype == torch.int32:
+        x = x.to(torch.int64)
+        x = x * multiplier // divisor
+        x = x.to(torch.int32)
+        return x
     return x * multiplier // divisor
 
 
