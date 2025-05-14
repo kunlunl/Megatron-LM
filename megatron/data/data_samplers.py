@@ -372,7 +372,6 @@ class SftConcatWithinBatchSampler:
             if cp_size == current_cp_size:
                 break
         next_cp_size = possible_cp_sizes[(i + 1) % len(possible_cp_sizes)]
-        print("next_cp_size:", next_cp_size)
 
         dp_for_sample_rank = mpu.get_data_parallel_rank() // next_cp_size
         dp_for_sample_size = mpu.get_data_parallel_world_size() // next_cp_size

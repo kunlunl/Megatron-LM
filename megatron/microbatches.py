@@ -129,8 +129,11 @@ class CachedNumMicroBatches(NumMicroBatchesCalculator):
         cp_size = cp_size_set.pop()
         assert cp_size > 0
 
-        from megatron.core import mpu # Avoid circular import
-        print(f"Set cp_size to {cp_size}")
+         # Avoid circular import
+        from megatron.core import mpu
+        from megatron import print_rank_0
+
+        print_rank_0(f"Set cp_size to {cp_size}")
         mpu.set_context_parallel_world_size(cp_size)
 
 
