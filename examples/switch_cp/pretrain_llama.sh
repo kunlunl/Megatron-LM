@@ -116,8 +116,6 @@ mpirun --allow-run-as-root \
     --tensor-model-parallel-size $TP \
     --sequence-parallel \
     --pipeline-model-parallel-size $PP \
-    --num-layers-per-virtual-pipeline-stage $PP_l \
-    --overlap-p2p-communication \
     --context-parallel-size $CP \
     --all-possible-context-parallel-sizes $ALL_CP \
     $CKPT_ARGS \
@@ -126,10 +124,11 @@ mpirun --allow-run-as-root \
     --kaimm-cuda-synchronize-level 2 \
     --kaimm-gc-interval 9999 \
     --use-fast-rms-norm \
-    --use-fast-rope \
+    --no-context-parallel-comm-overlap-gemm \
     --kaimm-offload-activation-ratio $OFFLOAD_ALPHA \
     --kaimm-async-dataloader \
-    --prefetch-factor 64 \
+    --num-workers 0 \
+    --prefetch-factor 1 \
     $GPT_ARGS \
     $DATA_ARGS \
     $OUTPUT_ARGS \

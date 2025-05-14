@@ -66,13 +66,16 @@ def build_pretraining_data_loader(dataset, consumed_samples):
         raise Exception('{} dataloader type is not supported.'.format(
                 args.dataloader_type))
 
+    # TODO(kunlunl) Remove this.
+    prefetch_factor = args.prefetch_factor if args.num_workers > 0 else None
+
     # Torch dataloader.
     # Notice: here will use default collate_fn, see: torch/utils/data/_utils/collate.py
     return torch.utils.data.DataLoader(dataset,
                                        batch_sampler=batch_sampler,
                                        num_workers=args.num_workers,
                                        pin_memory=True,
-                                       prefetch_factor=args.prefetch_factor)
+                                       prefetch_factor=prefetch_factor)
 
 
 def build_sft_data_loader(dataset):
