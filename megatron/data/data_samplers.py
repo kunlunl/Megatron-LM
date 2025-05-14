@@ -364,19 +364,25 @@ class SftConcatWithinBatchSampler:
         return [entry[1] for entry in list(buckets)], max([bucket[0] for bucket in buckets])
 
     def search_for_buckets(self, batch: List[int]):
-        # TODO(kunlunl): Remove this.
+        lengths = self.dataset_sizes[batch]
+
+        # TODO: Remove this.
         # Need to replace with real scheduler logic.
-        current_cp_size = mpu.get_context_parallel_world_size()
-        possible_cp_sizes = mpu.get_context_parallel_all_possible_world_sizes()
-        for i, cp_size in enumerate(possible_cp_sizes):
-            if cp_size == current_cp_size:
-                break
-        next_cp_size = possible_cp_sizes[(i + 1) % len(possible_cp_sizes)]
+        possible_cp_sizes = sorted(mpu.get_context_parallel_all_possible_world_sizes())
+        if len(possible_cp_sizes) > 1:
+            max_length = self.dataset.max_length
+            max_length_this_batch = max(lengths)    
+            expected_length = max_length // possible_cp_sizes[-1]
+            for next_cp_size in possible_cp_sizes:
+                if max_length_this_batch // next_cp_size <= expected_length:
+                    break
+            print_rank_0(f"Choose next_cp_size to {next_cp_size}")
+        else:
+            next_cp_size = possible_cp_sizes[0]
 
         dp_for_sample_rank = mpu.get_data_parallel_rank() // next_cp_size
         dp_for_sample_size = mpu.get_data_parallel_world_size() // next_cp_size
 
-        lengths = self.dataset_sizes[batch]
         one_sample_per_bucket = get_args().sft_concat_mbs1
         i = 0
         assert max(lengths) <= self.max_seq_len, f"dp sample rank: {dp_for_sample_rank}: Maximum sequence length in this batch of samples exceeds max_seq_len requirement."
@@ -395,6 +401,12 @@ class SftConcatWithinBatchSampler:
         start_idx = dp_for_sample_rank * num_local_buckets
         end_idx = start_idx + num_local_buckets
         local_micro_batches = [[batch[idx] for idx in indices] for indices in indices_buckets[start_idx:end_idx]]
+
+        # TODO: Remove this
+        local_micro_batch_lengths = [[lengths[idx] for idx in indices] for indices in indices_buckets[start_idx:end_idx]]
+        local_micro_batch_length_sum = [sum([lengths[idx] for idx in indices]) for indices in indices_buckets[start_idx:end_idx]]
+        print(f"rank={torch.distributed.get_rank()}, local_micro_batch_lengths={local_micro_batch_lengths}, sum={local_micro_batch_length_sum}")
+
         num_samples_global_micro_batch = [sum(len(local_micro_batches) for local_micro_batches in indices_buckets[i::num_local_buckets]) for i in range(0, num_local_buckets)]
         assert len(local_micro_batches) == len(num_samples_global_micro_batch)
         return local_micro_batches, num_samples_global_micro_batch, next_cp_size

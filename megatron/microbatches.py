@@ -135,6 +135,7 @@ class CachedNumMicroBatches(NumMicroBatchesCalculator):
 
         print_rank_0(f"Set cp_size to {cp_size}")
         mpu.set_context_parallel_world_size(cp_size)
+        torch.cuda.empty_cache()
 
 
 class RampupBatchsizeNumMicroBatches(NumMicroBatchesCalculator):
