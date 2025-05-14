@@ -119,6 +119,7 @@ mpirun --allow-run-as-root \
     --num-layers-per-virtual-pipeline-stage $PP_l \
     --overlap-p2p-communication \
     --context-parallel-size $CP \
+    --all-possible-context-parallel-sizes $ALL_CP \
     $CKPT_ARGS \
     $TP_OVERLAP_ARGS \
     --kaimm-overlap-cp-slow-ctas 4 \

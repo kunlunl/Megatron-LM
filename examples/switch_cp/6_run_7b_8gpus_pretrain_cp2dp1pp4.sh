@@ -14,8 +14,8 @@ export MASTER_ADDR=127.0.0.1
 export NUM_GPUS=8
 
 export TP=1
-export CP=1
-export ALL_CP="1"
+export CP=2
+export ALL_CP="2"
 export PP=4
 export PP_l=1
 export CKPT=ours

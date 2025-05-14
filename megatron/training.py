@@ -756,10 +756,15 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
     while iteration < args.train_iters:
 
         # TODO(kunlunl): Remove this.
-        # possible_cp_size = mpu.get_context_parallel_all_possible_world_sizes()
-        # cp_size = possible_cp_size[iteration % len(possible_cp_size)]
-        # print(f"Set cp_size to {cp_size}")
-        # mpu.set_context_parallel_world_size(cp_size)
+        import os
+        set_random_cp_size = int(os.getenv('SET_RANDOM_CP_SIZE', '0'))
+        if set_random_cp_size == 1:
+            possible_cp_size = mpu.get_context_parallel_all_possible_world_sizes()
+            cp_size = possible_cp_size[iteration % len(possible_cp_size)]
+            print_rank_0(f"Set cp_size to {cp_size}")
+            mpu.set_context_parallel_world_size(cp_size)
+        else:
+            print_rank_0(f"Skip set random cp size, current cp size is {mpu.get_context_parallel_world_size()}")
 
         update_num_microbatches(args.consumed_train_samples)
         if args.sft_concat:
