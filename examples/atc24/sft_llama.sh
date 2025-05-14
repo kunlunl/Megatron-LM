@@ -134,7 +134,7 @@ mpirun --allow-run-as-root \
     --kaimm-cuda-synchronize-level 2 \
     --kaimm-gc-interval 9999 \
     --use-fast-rms-norm \
-    --use-fast-rope \
+    --no-context-parallel-comm-overlap-gemm \
     --kaimm-offload-activation-ratio $OFFLOAD_ALPHA \
     --kaimm-async-dataloader \
     --prefetch-factor 64 \

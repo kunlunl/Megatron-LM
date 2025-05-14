@@ -20,5 +20,6 @@ export PP=4
 export PP_l=1
 export CKPT=full
 export OFFLOAD_ALPHA=0.0
+export NUM_LAYERS=32
 
 ./sft_llama.sh
