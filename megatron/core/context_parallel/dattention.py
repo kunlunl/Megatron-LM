@@ -38,7 +38,7 @@ def flip_cp(x, dim, world_size):
 
 # @torch.compile(dynamic=True)
 def mul_floordiv(x, multiplier, divisor):
-    # TODO: Remove this
+    # TODO(kunlunl): Remove this.
     if isinstance(x, torch.Tensor) and x.dtype == torch.int32:
         x = x.to(torch.int64)
         x = x * multiplier // divisor
@@ -532,7 +532,7 @@ class ForwardGatherBackwardSliceFunction(torch.autograd.Function):
 
 
 def dattention(qi, ki, vi, cp_group, packing_info=None):
-    # TODO: Remove this check
+    # TODO(kunlunl): Remove this.
     # assert len(qi.shape) == 4
     # assert len(ki.shape) == 4
     # assert len(vi.shape) == 4

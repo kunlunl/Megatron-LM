@@ -366,7 +366,7 @@ class SftConcatWithinBatchSampler:
     def search_for_buckets(self, batch: List[int]):
         lengths = self.dataset_sizes[batch]
 
-        # TODO: Remove this.
+        # TODO(kunlunl): Remove this.
         # Need to replace with real scheduler logic.
         possible_cp_sizes = sorted(mpu.get_context_parallel_all_possible_world_sizes())
         if len(possible_cp_sizes) > 1:
@@ -402,10 +402,10 @@ class SftConcatWithinBatchSampler:
         end_idx = start_idx + num_local_buckets
         local_micro_batches = [[batch[idx] for idx in indices] for indices in indices_buckets[start_idx:end_idx]]
 
-        # TODO: Remove this
-        local_micro_batch_lengths = [[lengths[idx] for idx in indices] for indices in indices_buckets[start_idx:end_idx]]
-        local_micro_batch_length_sum = [sum([lengths[idx] for idx in indices]) for indices in indices_buckets[start_idx:end_idx]]
-        print(f"rank={torch.distributed.get_rank()}, local_micro_batch_lengths={local_micro_batch_lengths}, sum={local_micro_batch_length_sum}")
+        # TODO(kunlunl): Remove this.
+        # local_micro_batch_lengths = [[lengths[idx] for idx in indices] for indices in indices_buckets[start_idx:end_idx]]
+        # local_micro_batch_length_sum = [sum([lengths[idx] for idx in indices]) for indices in indices_buckets[start_idx:end_idx]]
+        # print(f"rank={torch.distributed.get_rank()}, local_micro_batch_lengths={local_micro_batch_lengths}, sum={local_micro_batch_length_sum}")
 
         num_samples_global_micro_batch = [sum(len(local_micro_batches) for local_micro_batches in indices_buckets[i::num_local_buckets]) for i in range(0, num_local_buckets)]
         assert len(local_micro_batches) == len(num_samples_global_micro_batch)
