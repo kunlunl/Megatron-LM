@@ -85,7 +85,10 @@ class GPTModel(MegatronModule):
                 retriever_attn_mask=None,
                 labels=None, tokentype_ids=None, inference_params=None):
 
-        total_seq_len = input_ids.shape[1]
+        if input_ids is None:
+            total_seq_len = None
+        else:
+            total_seq_len = input_ids.shape[1]
         input_ids, position_ids, attention_mask, labels = \
             slice_lm_inputs_along_cp(input_ids, position_ids, attention_mask, labels, packing_info=packing_info)
 

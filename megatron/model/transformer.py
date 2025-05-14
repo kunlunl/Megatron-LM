@@ -474,6 +474,8 @@ class FlashSelfAttention(torch.nn.Module):
                     tp_rank=tp_rank,
                     tp_world_size=tp_world_size
                 )
+            output = rearrange(output, '(b s) ... -> b s ...', b=batch_size)
+            return output
         else:
             extra_args = {
                 'alibi_bias_max': self.alibi_bias_max,
