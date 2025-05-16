@@ -1500,7 +1500,7 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, load_arg='load', 
     else:
         if (args.fp16 or args.bf16) and optimizer is not None:
             if args.load_main_params_from_ckpt:
-                optimizer.reload_model_params(state_dict=state_dict['model'])
+                optimizer.reload_model_params(state_dict=state_dict)
             else:
                 optimizer.reload_model_params()
 

@@ -2121,15 +2121,29 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             return
 
         if state_dict is not None:
+            state_dict_list = []
+            if len(self.model_chunks) == 1:
+                # When there is only one model chunk, the state_dict should have a "model" key.
+                assert "model" in state_dict.keys(), "Wrong state_dict format, cannot find 'model'"
+                state_dict_list.append(state_dict["model"])
+            else:
+                # When there are multiple model chunks, the state_dict should have keys = "model0",
+                # "model1", "model2", etc.
+                for i in range(len(self.model_chunks)):
+                    assert (
+                        "model%d" % i in state_dict.keys()
+                    ), f"Wrong state_dict format, cannot find 'model{i}'"
+                    state_dict_list.append(state_dict["model%d" % i])
+            # Create a map from model params to tensors in state_dict based on their names.
             model_param_to_state_dict_param_map = {}
-            names_in_state_dict = set(state_dict.keys())
-            for model_chunk in self.model_chunks:
+            for chunk_idx, model_chunk in enumerate(self.model_chunks):
+                names_in_state_dict = set(state_dict_list[chunk_idx].keys())
                 for name, model_param in model_chunk.named_parameters():
                     matched_keys = [k for k in names_in_state_dict if k in name]
                     assert (
                         len(matched_keys) == 1
                     ), f"Parameter {name} has {len(matched_keys)} matches in state dict"
-                    state_dict_param = state_dict[matched_keys[0]]
+                    state_dict_param = state_dict_list[chunk_idx][matched_keys[0]]
                     assert model_param.shape == state_dict_param.shape
                     model_param_to_state_dict_param_map[model_param] = state_dict_param
                     names_in_state_dict.remove(matched_keys[0])
