@@ -2123,9 +2123,10 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         if state_dict is not None:
             state_dict_list = []
             if len(self.model_chunks) == 1:
-                # When there is only one model chunk, the state_dict should have a "model" key.
-                assert "model" in state_dict.keys(), "Wrong state_dict format, cannot find 'model'"
-                state_dict_list.append(state_dict["model"])
+                if "model" in state_dict.keys():
+                    state_dict_list.append(state_dict["model"])
+                else:
+                    state_dict_list.append(state_dict)
             else:
                 # When there are multiple model chunks, the state_dict should have keys = "model0",
                 # "model1", "model2", etc.
