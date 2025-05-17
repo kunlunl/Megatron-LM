@@ -2122,19 +2122,20 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
 
         if state_dict is not None:
             state_dict_list = []
-            if len(self.model_chunks) == 1:
-                if "model" in state_dict.keys():
-                    state_dict_list.append(state_dict["model"])
-                else:
-                    state_dict_list.append(state_dict)
-            else:
+            if "model0" in state_dict or "model_0" in state_dict:
                 # When there are multiple model chunks, the state_dict should have keys = "model0",
                 # "model1", "model2", etc (For NeMo, it's "model_0", "model_1", "model_2", etc).
-                prefix = "model" if "model0" in state_dict.keys() else "model_"
+                prefix = "model" if "model0" in state_dict else "model_"
                 for i in range(len(self.model_chunks)):
                     k = f"{prefix}{i}"
-                    assert k in state_dict.keys(), f"Wrong state_dict format, cannot find '{k}'"
+                    assert k in state_dict, f"Wrong state_dict format, cannot find '{k}'"
                     state_dict_list.append(state_dict[k])
+            elif "model" in state_dict:
+                assert len(self.model_chunks) == 1
+                state_dict_list.append(state_dict["model"])
+            else:
+                assert len(self.model_chunks) == 1
+                state_dict_list.append(state_dict)
             # Create a map from model params to tensors in state_dict based on their names.
             model_param_to_state_dict_param_map = {}
             for chunk_idx, model_chunk in enumerate(self.model_chunks):

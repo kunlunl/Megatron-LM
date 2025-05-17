@@ -1085,8 +1085,28 @@ class ChainedOptimizer(MegatronOptimizer):
             return torch.tensor([1.0], dtype=torch.float32, device=torch.cuda.current_device())
 
     def reload_model_params(self, state_dict=None):
-        for optimizer in self.chained_optimizers:
-            optimizer.reload_model_params(state_dict=state_dict)
+        state_dicts = [None] * len(self.chained_optimizers)
+        if state_dict is not None:
+            if len(self.model_chunks) == 1:
+                state_dicts[0] = state_dict
+            else:
+                # Split state_dict if needed
+                prefix = "model" if "model0" in state_dict.keys() else "model_"
+                offset = 0
+                for optimizer_idx, optimizer in enumerate(self.chained_optimizers):
+                    if hasattr(optimizer, "model_chunks"):
+                        d = {}
+                        for chunk_idx in range(len(optimizer.model_chunks)):
+                            assert (
+                                f"{prefix}{offset}" in state_dict
+                            ), f"Wrong state_dict format, cannot find '{prefix}{offset}'"
+                            d[f"{prefix}{chunk_idx}"] = state_dict[f"{prefix}{offset}"]
+                            offset += 1
+                        if len(d) > 0:
+                            state_dicts[optimizer_idx] = d
+
+        for idx, optimizer in enumerate(self.chained_optimizers):
+            optimizer.reload_model_params(state_dict=state_dicts[idx])
 
     def state_dict(self):
         if len(self.chained_optimizers) == 1:
