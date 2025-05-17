@@ -2129,9 +2129,10 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     state_dict_list.append(state_dict)
             else:
                 # When there are multiple model chunks, the state_dict should have keys = "model0",
-                # "model1", "model2", etc.
+                # "model1", "model2", etc (For NeMo, it's "model_0", "model_1", "model_2", etc).
+                prefix = "model" if "model0" in state_dict.keys() else "model_"
                 for i in range(len(self.model_chunks)):
-                    k = f"model{i}"
+                    k = f"{prefix}{i}"
                     assert k in state_dict.keys(), f"Wrong state_dict format, cannot find '{k}'"
                     state_dict_list.append(state_dict[k])
             # Create a map from model params to tensors in state_dict based on their names.
