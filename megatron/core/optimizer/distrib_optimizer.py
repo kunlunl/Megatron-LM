@@ -2140,7 +2140,9 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             for chunk_idx, model_chunk in enumerate(self.model_chunks):
                 names_in_state_dict = set(state_dict_list[chunk_idx].keys())
                 for name, model_param in model_chunk.named_parameters():
-                    matched_keys = [k for k in names_in_state_dict if k in name]
+                    while name.startswith("module."):
+                        name = name[len("module.") :]
+                    matched_keys = [k for k in names_in_state_dict if name in k]
                     assert (
                         len(matched_keys) == 1
                     ), f"Parameter {name} has {len(matched_keys)} matches in state dict"
