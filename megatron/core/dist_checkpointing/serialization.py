@@ -1,6 +1,6 @@
 # Copyright (c) 2022-2023, NVIDIA CORPORATION.  All rights reserved.
 
-""" Entrypoints for saving and loading the distributed checkpoints.
+"""Entrypoints for saving and loading the distributed checkpoints.
 
 Functions `load` and `save` are equivalents of `torch.load` and `torch.save`
 but expect torch.Tensors to be wrapped with classes from the `mapping module`.
@@ -18,7 +18,7 @@ from megatron.core.msc_utils import MultiStorageClientFeature
 
 from . import ShardedTensor
 from .core import CheckpointingConfig, save_config
-from .dict_utils import extract_matching_values, merge
+from .dict_utils import extract_matching_values, merge, nested_values
 from .mapping import (
     CheckpointingException,
     CommonStateDict,
@@ -102,6 +102,12 @@ def load(
         StateDict or Tuple[StateDict, Set[str], Set[str]]: in most cases only
             the loaded state dict is returned. If `strict` flag was set to
     """
+    from ..fp8_utils import dequantize_fp8_tensor, is_float8tensor  # Avoid circular import
+
+    for v in nested_values(sharded_state_dict):
+        if hasattr(v, "data") and is_float8tensor(v.data):
+            v.data = dequantize_fp8_tensor(v.data)
+
     sharded_strategy, common_strategy = verify_checkpoint_and_load_strategy(
         checkpoint_dir, sharded_strategy, common_strategy
     )
