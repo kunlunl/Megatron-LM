@@ -4,7 +4,7 @@
 
 import os
 import torch
-from typing import Optional
+from typing import Optional, List
 
 from .utils import GlobalMemoryBuffer, GlobalTEUserBuffer
 
@@ -33,9 +33,10 @@ _AMAX_REDUCTION_GROUP = None
 #   1. The dataloader should load contiguous tokens along the context parallel group.
 #   2. Attention is performed across the context parallel group.
 #   3. Loss and learning rate should be carefully scaled.
-_CONTEXT_PARALLEL_GROUP = None
-_CONTEXT_PARALLEL_GROUP_SLOW = None
-_CONTEXT_PARALLEL_GROUP_LOCAL = None
+# Dict mapping: context_parallel_size -> parallel_group
+_CONTEXT_PARALLEL_GROUP_DICT = None
+_CONTEXT_PARALLEL_GROUP_SLOW_DICT = None
+_CONTEXT_PARALLEL_GROUP_LOCAL_DICT = None
 
 _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK = None
 _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = None
@@ -44,6 +45,8 @@ _PIPELINE_MODEL_PARALLEL_SPLIT_RANK = None
 # These values enable us to change the mpu sizes on the fly.
 _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE = None
 _MPU_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = None
+_MPU_CONTEXT_PARALLEL_ALL_POSSIBLE_WORLD_SIZES = None
+_MPU_CONTEXT_PARALLEL_WORLD_SIZE = None
 _MPU_TENSOR_MODEL_PARALLEL_RANK = None
 _MPU_PIPELINE_MODEL_PARALLEL_RANK = None
 
@@ -81,6 +84,7 @@ def initialize_model_parallel(
     use_fp8: bool = False,
     *,
     context_parallel_size: int = 1,
+    all_possible_context_parallel_sizes: Optional[List[int]] = None,
     kaimm_cp_offload_mode = None,
     kaimm_overlap_cp_slow_ctas = None,
     overlap_sp_ag = False,
@@ -158,7 +162,6 @@ def initialize_model_parallel(
 
     data_parallel_size: int = world_size // (tensor_model_parallel_size *
                                              pipeline_model_parallel_size)
-    assert data_parallel_size % context_parallel_size == 0, f"{data_parallel_size} % {context_parallel_size} != 0"
 
     num_tensor_model_parallel_groups: int  = world_size // tensor_model_parallel_size
     num_pipeline_model_parallel_groups: int = world_size // pipeline_model_parallel_size
@@ -179,15 +182,31 @@ def initialize_model_parallel(
 
     rank = torch.distributed.get_rank()
 
+    global _MPU_CONTEXT_PARALLEL_WORLD_SIZE
+    global _MPU_CONTEXT_PARALLEL_ALL_POSSIBLE_WORLD_SIZES
+    _MPU_CONTEXT_PARALLEL_WORLD_SIZE = context_parallel_size
+    _MPU_CONTEXT_PARALLEL_ALL_POSSIBLE_WORLD_SIZES = []
+    if all_possible_context_parallel_sizes is None:
+        all_possible_context_parallel_sizes = [context_parallel_size]
+    for _context_parallel_size in all_possible_context_parallel_sizes:
+        assert _context_parallel_size <= data_parallel_size, \
+            'context_parallel_size {} is greater than data_parallel_size {}'.format(_context_parallel_size, data_parallel_size)
+        assert (_context_parallel_size & (_context_parallel_size - 1)) == 0, \
+            'context_parallel_size {} is not a power of 2'.format(_context_parallel_size)
+        _MPU_CONTEXT_PARALLEL_ALL_POSSIBLE_WORLD_SIZES.append(_context_parallel_size)
+
     # Build the data-parallel groups.
     global _DATA_PARALLEL_GROUP
     global _DATA_PARALLEL_GROUP_GLOO
     global _DATA_PARALLEL_GLOBAL_RANKS
     assert _DATA_PARALLEL_GROUP is None, 'data parallel group is already initialized'
-    global _CONTEXT_PARALLEL_GROUP
-    global _CONTEXT_PARALLEL_GROUP_SLOW
-    global _CONTEXT_PARALLEL_GROUP_LOCAL
-    assert _CONTEXT_PARALLEL_GROUP is None, 'context parallel group is already initialized'
+    global _CONTEXT_PARALLEL_GROUP_DICT
+    global _CONTEXT_PARALLEL_GROUP_SLOW_DICT
+    global _CONTEXT_PARALLEL_GROUP_LOCAL_DICT
+    assert _CONTEXT_PARALLEL_GROUP_DICT is None, 'context parallel group is already initialized'
+    _CONTEXT_PARALLEL_GROUP_DICT = {}
+    _CONTEXT_PARALLEL_GROUP_SLOW_DICT = {}
+    _CONTEXT_PARALLEL_GROUP_LOCAL_DICT = {}
     all_data_parallel_group_ranks = []
     for i in range(pipeline_model_parallel_size):
         start_rank = i * num_pipeline_model_parallel_groups
@@ -201,42 +220,44 @@ def initialize_model_parallel(
                 _DATA_PARALLEL_GROUP = group
                 _DATA_PARALLEL_GROUP_GLOO = group_gloo
                 _DATA_PARALLEL_GLOBAL_RANKS = ranks
-            for k in range(data_parallel_size // context_parallel_size):
-                ranks = range(
-                    start_rank + j + k * (tensor_model_parallel_size * context_parallel_size),
-                    start_rank + j + (k + 1) * (tensor_model_parallel_size * context_parallel_size),
-                    tensor_model_parallel_size,
-                )
-                group = torch.distributed.new_group(ranks)
-                if rank in ranks:
-                    _CONTEXT_PARALLEL_GROUP = group
-                if context_parallel_size >= 2:
-                    assert kaimm_cp_offload_mode in [0, 1, 2]
-                    if kaimm_cp_offload_mode == 0:
-                        check_ctas_settings_are_effective()
-                        opt_slow = torch.distributed.ProcessGroupNCCL.Options()
-                        if kaimm_overlap_cp_slow_ctas is not None:
-                            opt_slow.config.min_ctas = opt_slow.config.max_ctas = kaimm_overlap_cp_slow_ctas
-                        group_slow = torch.distributed.new_group(ranks, pg_options=opt_slow)
-                        if rank in ranks:
-                            _CONTEXT_PARALLEL_GROUP_SLOW = group_slow
-                    else:
-                        if kaimm_cp_offload_mode == 1:
-                            local_device_count = min(torch.cuda.device_count(), tensor_model_parallel_size)
+            for _context_parallel_size in all_possible_context_parallel_sizes:
+                assert data_parallel_size % _context_parallel_size == 0, f"{data_parallel_size} % {_context_parallel_size} != 0"
+                for k in range(data_parallel_size // _context_parallel_size):
+                    ranks = range(
+                        start_rank + j + k * (tensor_model_parallel_size * _context_parallel_size),
+                        start_rank + j + (k + 1) * (tensor_model_parallel_size * _context_parallel_size),
+                        tensor_model_parallel_size,
+                    )
+                    group = torch.distributed.new_group(ranks)
+                    if rank in ranks:
+                        _CONTEXT_PARALLEL_GROUP_DICT[_context_parallel_size] = group
+                    if _context_parallel_size >= 2:
+                        assert kaimm_cp_offload_mode in [0, 1, 2]
+                        if kaimm_cp_offload_mode == 0:
+                            check_ctas_settings_are_effective()
+                            opt_slow = torch.distributed.ProcessGroupNCCL.Options()
+                            if kaimm_overlap_cp_slow_ctas is not None:
+                                opt_slow.config.min_ctas = opt_slow.config.max_ctas = kaimm_overlap_cp_slow_ctas
+                            group_slow = torch.distributed.new_group(ranks, pg_options=opt_slow)
+                            if rank in ranks:
+                                _CONTEXT_PARALLEL_GROUP_SLOW_DICT[_context_parallel_size] = group_slow
                         else:
-                            local_device_count = torch.cuda.device_count()
-                        local_start_idx = 0
-                        while local_start_idx < len(ranks):
-                            local_end_idx = local_start_idx + 1
-                            while local_end_idx < len(ranks) and \
-                                    ranks[local_start_idx] // local_device_count == \
-                                    ranks[local_end_idx] // local_device_count:
-                                local_end_idx += 1
-                            ranks_local = ranks[local_start_idx:local_end_idx]
-                            group_local = torch.distributed.new_group(ranks_local)
-                            if rank in ranks_local:
-                                _CONTEXT_PARALLEL_GROUP_LOCAL = group_local
-                            local_start_idx = local_end_idx
+                            if kaimm_cp_offload_mode == 1:
+                                local_device_count = min(torch.cuda.device_count(), tensor_model_parallel_size)
+                            else:
+                                local_device_count = torch.cuda.device_count()
+                            local_start_idx = 0
+                            while local_start_idx < len(ranks):
+                                local_end_idx = local_start_idx + 1
+                                while local_end_idx < len(ranks) and \
+                                        ranks[local_start_idx] // local_device_count == \
+                                        ranks[local_end_idx] // local_device_count:
+                                    local_end_idx += 1
+                                ranks_local = ranks[local_start_idx:local_end_idx]
+                                group_local = torch.distributed.new_group(ranks_local)
+                                if rank in ranks_local:
+                                    _CONTEXT_PARALLEL_GROUP_LOCAL_DICT[_context_parallel_size] = group_local
+                                local_start_idx = local_end_idx
 
     # Build the model-parallel groups.
     global _MODEL_PARALLEL_GROUP
@@ -368,23 +389,23 @@ def get_pipeline_model_parallel_group():
 
 def get_context_parallel_group():
     """Get the context parallel group the caller rank belongs to."""
-    assert _CONTEXT_PARALLEL_GROUP is not None, \
-        'context parallel group is not initialized'
-    return _CONTEXT_PARALLEL_GROUP
+    assert _CONTEXT_PARALLEL_GROUP_DICT is not None, \
+        'context parallel group dict is not initialized'
+    return _CONTEXT_PARALLEL_GROUP_DICT[get_context_parallel_world_size()]
 
 
 def get_context_parallel_group_slow():
     """Get the context parallel group-slow the caller rank belongs to."""
-    assert _CONTEXT_PARALLEL_GROUP_SLOW is not None, \
-        'context parallel group-slow is not initialized'
-    return _CONTEXT_PARALLEL_GROUP_SLOW
+    assert _CONTEXT_PARALLEL_GROUP_SLOW_DICT is not None, \
+        'context parallel group-slow dict is not initialized'
+    return _CONTEXT_PARALLEL_GROUP_SLOW_DICT[get_context_parallel_world_size()]
 
 
 def get_context_parallel_group_local():
     """Get the context parallel group-local the caller rank belongs to."""
-    assert _CONTEXT_PARALLEL_GROUP_LOCAL is not None, \
-        'context parallel group-local is not initialized'
-    return _CONTEXT_PARALLEL_GROUP_LOCAL
+    assert _CONTEXT_PARALLEL_GROUP_LOCAL_DICT is not None, \
+        'context parallel group-local dict is not initialized'
+    return _CONTEXT_PARALLEL_GROUP_LOCAL_DICT[get_context_parallel_world_size()]
 
 
 def get_data_parallel_group():
@@ -438,6 +459,15 @@ def set_virtual_pipeline_model_parallel_world_size(world_size):
     global _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
     _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = world_size
 
+
+def set_context_parallel_world_size(world_size):
+    """Set the context parallel size"""
+    global _MPU_CONTEXT_PARALLEL_WORLD_SIZE
+    assert world_size in _MPU_CONTEXT_PARALLEL_ALL_POSSIBLE_WORLD_SIZES, \
+        f'context parallel world size {world_size} is not allowed'
+    _MPU_CONTEXT_PARALLEL_WORLD_SIZE = world_size
+
+
 def get_tensor_model_parallel_world_size():
     """Return world size for the tensor model parallel group."""
     global _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE
@@ -454,9 +484,17 @@ def get_pipeline_model_parallel_world_size():
     return torch.distributed.get_world_size(group=get_pipeline_model_parallel_group())
 
 
+def get_context_parallel_all_possible_world_sizes():
+    """Return all possible world sizes for the context parallel group."""
+    assert _MPU_CONTEXT_PARALLEL_ALL_POSSIBLE_WORLD_SIZES is not None, \
+        'context parallel all possible world sizes is not initialized'
+    return _MPU_CONTEXT_PARALLEL_ALL_POSSIBLE_WORLD_SIZES
+
+
 def get_context_parallel_world_size():
     """Return world size for the context parallel group."""
-    return torch.distributed.get_world_size(group=get_context_parallel_group())
+    assert _MPU_CONTEXT_PARALLEL_WORLD_SIZE is not None, 'context parallel world size is not set'
+    return _MPU_CONTEXT_PARALLEL_WORLD_SIZE
 
 
 def set_tensor_model_parallel_rank(rank):
@@ -713,10 +751,12 @@ def destroy_model_parallel():
     _TENSOR_MODEL_PARALLEL_GROUP = None
     global _PIPELINE_MODEL_PARALLEL_GROUP
     _PIPELINE_MODEL_PARALLEL_GROUP = None
-    global _CONTEXT_PARALLEL_GROUP
-    _CONTEXT_PARALLEL_GROUP = None
-    global _CONTEXT_PARALLEL_GROUP_SLOW
-    _CONTEXT_PARALLEL_GROUP_SLOW = None
+    global _CONTEXT_PARALLEL_GROUP_DICT
+    _CONTEXT_PARALLEL_GROUP_DICT = None
+    global _CONTEXT_PARALLEL_GROUP_SLOW_DICT
+    _CONTEXT_PARALLEL_GROUP_SLOW_DICT = None
+    global _CONTEXT_PARALLEL_GROUP_LOCAL_DICT
+    _CONTEXT_PARALLEL_GROUP_LOCAL_DICT = None
     global _DATA_PARALLEL_GROUP
     _DATA_PARALLEL_GROUP = None
     global _EMBEDDING_GROUP
@@ -733,6 +773,8 @@ def destroy_model_parallel():
     _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE = None
     global _MPU_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
     _MPU_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = None
+    global _MPU_CONTEXT_PARALLEL_WORLD_SIZE
+    _MPU_CONTEXT_PARALLEL_WORLD_SIZE = None
     global _MPU_TENSOR_MODEL_PARALLEL_RANK
     _MPU_TENSOR_MODEL_PARALLEL_RANK = None
     global _MPU_PIPELINE_MODEL_PARALLEL_RANK

@@ -11,13 +11,14 @@ export GLOBAL_BATCH_SIZE=16
 
 export HOSTFILE=
 export MASTER_ADDR=127.0.0.1
-export NUM_GPUS=4
+export NUM_GPUS=8
 
 export TP=1
 export CP=1
+export ALL_CP="1"
 export PP=4
-export PP_l=1
 export CKPT=full
 export OFFLOAD_ALPHA=0.0
+export NUM_LAYERS=32
 
-./sft_llama.sh
+./pretrain_llama.sh

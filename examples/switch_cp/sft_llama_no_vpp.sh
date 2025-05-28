@@ -124,8 +124,6 @@ mpirun --allow-run-as-root \
     --tensor-model-parallel-size $TP \
     --sequence-parallel \
     --pipeline-model-parallel-size $PP \
-    --num-layers-per-virtual-pipeline-stage $PP_l \
-    --overlap-p2p-communication \
     --context-parallel-size $CP \
     --all-possible-context-parallel-sizes $ALL_CP \
     $CKPT_ARGS \

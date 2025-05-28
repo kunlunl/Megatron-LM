@@ -48,10 +48,12 @@ def build_pretraining_data_loader(dataset, consumed_samples):
         batch_sampler = MegatronPretrainingSampler(
             total_samples=len(dataset),
             consumed_samples=consumed_samples,
-            micro_batch_size=args.micro_batch_size,
-            data_parallel_rank=mpu.get_data_parallel_for_sample_rank(),
-            data_parallel_size=mpu.get_data_parallel_for_sample_world_size())
+            micro_batch_size=args.micro_batch_size)
     elif args.dataloader_type == 'cyclic':
+        if len(args.all_possible_context_parallel_sizes) != 1:
+            # When context parallel changes, dp_for_sample also changes, so cannot calcuate the 
+            # last_batch_size, therefore cannot calculate epoch and current_epoch_samples.
+            raise NotImplementedError('Currently cyclic dataloader does not support hot-switch.')
         batch_sampler = MegatronPretrainingRandomSampler(
             dataset,
             total_samples=len(dataset),
@@ -64,13 +66,16 @@ def build_pretraining_data_loader(dataset, consumed_samples):
         raise Exception('{} dataloader type is not supported.'.format(
                 args.dataloader_type))
 
+    # TODO(kunlunl) Remove this.
+    prefetch_factor = args.prefetch_factor if args.num_workers > 0 else None
+
     # Torch dataloader.
     # Notice: here will use default collate_fn, see: torch/utils/data/_utils/collate.py
     return torch.utils.data.DataLoader(dataset,
                                        batch_sampler=batch_sampler,
                                        num_workers=args.num_workers,
                                        pin_memory=True,
-                                       prefetch_factor=args.prefetch_factor)
+                                       prefetch_factor=prefetch_factor)
 
 
 def build_sft_data_loader(dataset):
@@ -83,17 +88,27 @@ def build_sft_data_loader(dataset):
 
     sft_concat = args.sft_concat
 
-    if args.dataloader_type == 'single':
+    if sft_concat:
+        print_rank_0("---------------------- using sample concat within batch sampler ----------------------")
+        batch_sampler = SftConcatWithinBatchSampler(dataset,
+            total_samples=len(dataset),
+            consumed_samples=0,
+            global_batch_size=args.global_batch_size,
+            dataset_sizes=dataset.sizes,
+            max_seq_len=args.seq_length)
+    elif args.dataloader_type == 'single':
         print_rank_0("---------------------- using distributed sampler ----------------------")
         batch_sampler = MegatronPretrainingSampler(
             total_samples=len(dataset),
             consumed_samples=0,
             micro_batch_size=args.micro_batch_size,
-            data_parallel_rank=mpu.get_data_parallel_for_sample_rank(),
-            data_parallel_size=mpu.get_data_parallel_for_sample_world_size(),
             sft_concat=sft_concat)
     elif args.dataloader_type == 'cyclic':
         print_rank_0("---------------------- using random distributed sampler ----------------------")
+        if len(args.all_possible_context_parallel_sizes) != 1:
+            # When context parallel changes, dp_for_sample also changes, so cannot calcuate the 
+            # last_batch_size, therefore cannot calculate epoch and current_epoch_samples.
+            raise NotImplementedError('Currently cyclic dataloader does not support hot-switch.')
         batch_sampler = MegatronSftRandomSampler(dataset,
                                                  total_samples=len(dataset),
                                                  consumed_samples=0,
@@ -106,19 +121,8 @@ def build_sft_data_loader(dataset):
         raise NotImplementedError
 
     if sft_concat:
-        print_rank_0("---------------------- using sample concat within batch sampler ----------------------")
-        batch_sampler = SftConcatWithinBatchSampler(dataset,
-            total_samples=len(dataset),
-            consumed_samples=0,
-            global_batch_size=args.global_batch_size,
-            dataset_sizes=dataset.sizes,
-            data_parallel_rank=mpu.get_data_parallel_for_sample_rank(),
-            data_parallel_size=mpu.get_data_parallel_for_sample_world_size(),
-            max_seq_len=args.seq_length
-            )
         print_rank_0("---------------------- using collate_fn for sample cncatenation ----------------------")
         collate_fn = SampleConcatDataCollatorForSupervisedDataset(tokenizer)
-
     elif args.sft_padding or args.micro_batch_size > 1:
         print_rank_0("---------------------- using collate_fn for padding ----------------------")
         assert args.seq_length % mpu.get_tensor_model_parallel_world_size() == 0
@@ -128,6 +132,7 @@ def build_sft_data_loader(dataset):
         collate_fn = DataCollatorForSupervisedDatasetWithOnlySP(tokenizer, mpu.get_tensor_model_parallel_world_size())
     else:
         collate_fn = None
+
     train_dataloader = torch.utils.data.DataLoader(dataset,
                                                    batch_sampler=batch_sampler,
                                                    collate_fn=collate_fn,
@@ -182,7 +187,7 @@ class SampleConcatDataCollatorForSupervisedDataset(object):
 
         for more details, please refer to fused_kernels/fast_flip_cuda.cu:flip
         '''
-        divisor = math.lcm(4, mpu.get_tensor_model_parallel_world_size()) * 2 * mpu.get_context_parallel_world_size()
+        divisor = np.lcm(4, mpu.get_tensor_model_parallel_world_size()) * 2 * mpu.get_context_parallel_world_size()
 
         all_input_ids = []
         all_label_mask = []
@@ -208,6 +213,7 @@ class SampleConcatDataCollatorForSupervisedDataset(object):
             label_mask=torch.as_tensor(np.expand_dims(label_mask, axis=0)),
             sample_lengths=torch.as_tensor(local_lengths)
         )
+
 
 @dataclass
 class DataCollatorForSupervisedDatasetWithOnlySP(object):
@@ -253,15 +259,11 @@ class VirtualPretrainingSampler:
 
 class MegatronPretrainingSampler:
 
-    def __init__(self, total_samples, consumed_samples, micro_batch_size,
-                 data_parallel_rank, data_parallel_size, drop_last=True, sft_concat=False):
+    def __init__(self, total_samples, consumed_samples, micro_batch_size, drop_last=True, sft_concat=False):
         # Keep a copy of input params for later use.
         self.total_samples = total_samples
         self.consumed_samples = consumed_samples
         self.micro_batch_size = micro_batch_size
-        self.data_parallel_rank = data_parallel_rank
-        self.micro_batch_times_data_parallel_size = \
-            self.micro_batch_size * data_parallel_size
         self.drop_last = drop_last
         self.sft_concat = sft_concat
 
@@ -272,10 +274,6 @@ class MegatronPretrainingSampler:
             'no samples left to consume: {}, {}'.format(self.consumed_samples,
                                                         self.total_samples)
         assert self.micro_batch_size > 0
-        assert data_parallel_size > 0
-        assert self.data_parallel_rank < data_parallel_size, \
-            'data_parallel_rank should be smaller than data size: {}, ' \
-            '{}'.format(self.data_parallel_rank, data_parallel_size)
 
     def __len__(self):
         return self.total_samples
@@ -283,9 +281,9 @@ class MegatronPretrainingSampler:
     def get_start_end_idx(self):
         if self.sft_concat:
             start_idx = 0
-            end_idx = self.micro_batch_times_data_parallel_size
+            end_idx = self.micro_batch_size * mpu.get_data_parallel_for_sample_world_size()
         else:
-            start_idx = self.data_parallel_rank * self.micro_batch_size
+            start_idx = mpu.get_data_parallel_for_sample_rank() * self.micro_batch_size
             end_idx = start_idx + self.micro_batch_size
         return start_idx, end_idx
 
@@ -294,7 +292,7 @@ class MegatronPretrainingSampler:
         # Last batch will be dropped if drop_last is not set False
         for idx in range(self.consumed_samples, self.total_samples):
             batch.append(idx)
-            if len(batch) == self.micro_batch_times_data_parallel_size:
+            if len(batch) == self.micro_batch_size * mpu.get_data_parallel_for_sample_world_size():
                 start_idx, end_idx = self.get_start_end_idx()
                 yield batch[start_idx:end_idx]
                 batch = []
@@ -304,15 +302,15 @@ class MegatronPretrainingSampler:
             start_idx, end_idx = self.get_start_end_idx()
             yield batch[start_idx:end_idx]
 
+
 class SftConcatWithinBatchSampler:
 
     def __init__(self, dataset, total_samples, consumed_samples, global_batch_size, dataset_sizes,
-                 data_parallel_rank, data_parallel_size, max_seq_len: int = 4096, drop_last=True):
+                 max_seq_len: int = 4096, drop_last=True):
         self.dataset = dataset
         self.total_samples = total_samples  # 一个 epoch 的样本数
         self.consumed_samples = consumed_samples  # 全局已消耗的样本数
         self.global_batch_size = global_batch_size
-        self.data_parallel_rank = data_parallel_rank
         self.drop_last = drop_last
         self.name = "SftConcatWithinBatchSampler"
         self.dataset_sizes = dataset_sizes
@@ -345,10 +343,6 @@ class SftConcatWithinBatchSampler:
             'no samples left to consume: {}, {}'.format(self.consumed_samples,
                                                         self.total_samples)
         assert self.global_batch_size > 0
-        assert data_parallel_size > 0
-        assert self.data_parallel_rank < data_parallel_size, \
-            'data_parallel_rank should be smaller than data size: {}, ' \
-            '{}'.format(self.data_parallel_rank, data_parallel_size)
     
     def set_num_workers_times_prefech_factor(self, num_workers_times_prefech_factor):
         self.consumed_samples_backoff_queue = deque(maxlen=num_workers_times_prefech_factor)
@@ -374,9 +368,27 @@ class SftConcatWithinBatchSampler:
 
     def search_for_buckets(self, batch: List[int]):
         lengths = self.dataset_sizes[batch]
+
+        # TODO(kunlunl): Remove this.
+        # Need to replace with real scheduler logic.
+        possible_cp_sizes = sorted(mpu.get_context_parallel_all_possible_world_sizes())
+        if len(possible_cp_sizes) > 1:
+            max_length = self.dataset.max_length
+            max_length_this_batch = max(lengths)    
+            expected_length = max_length // possible_cp_sizes[-1]
+            for next_cp_size in possible_cp_sizes:
+                if max_length_this_batch // next_cp_size <= expected_length:
+                    break
+            print_rank_0(f"Choose next_cp_size to {next_cp_size}")
+        else:
+            next_cp_size = possible_cp_sizes[0]
+
+        dp_for_sample_rank = mpu.get_data_parallel_rank() // next_cp_size
+        dp_for_sample_size = mpu.get_data_parallel_world_size() // next_cp_size
+
         one_sample_per_bucket = get_args().sft_concat_mbs1
         i = 0
-        assert max(lengths) <= self.max_seq_len, f"dp sample rank: {mpu.get_data_parallel_for_sample_rank()}: Maximum sequence length in this batch of samples exceeds max_seq_len requirement."
+        assert max(lengths) <= self.max_seq_len, f"dp sample rank: {dp_for_sample_rank}: Maximum sequence length in this batch of samples exceeds max_seq_len requirement."
         while(True):
             i += 1
             if one_sample_per_bucket:
@@ -384,17 +396,23 @@ class SftConcatWithinBatchSampler:
                 indices_buckets, max_bucket_sum = self.solver(lengths, num_buckets)
                 break
             else:
-                num_buckets = i * mpu.get_data_parallel_for_sample_world_size() * mpu.get_pipeline_model_parallel_world_size()
+                num_buckets = i * dp_for_sample_size * mpu.get_pipeline_model_parallel_world_size()
                 indices_buckets, max_bucket_sum = self.solver(lengths, num_buckets)
                 if max_bucket_sum <= self.max_seq_len:
                     break
-        num_local_buckets = len(indices_buckets) // mpu.get_data_parallel_for_sample_world_size()
-        start_idx = mpu.get_data_parallel_for_sample_rank() * num_local_buckets
+        num_local_buckets = len(indices_buckets) // dp_for_sample_size
+        start_idx = dp_for_sample_rank * num_local_buckets
         end_idx = start_idx + num_local_buckets
         local_micro_batches = [[batch[idx] for idx in indices] for indices in indices_buckets[start_idx:end_idx]]
+
+        # TODO(kunlunl): Remove this.
+        # local_micro_batch_lengths = [[lengths[idx] for idx in indices] for indices in indices_buckets[start_idx:end_idx]]
+        # local_micro_batch_length_sum = [sum([lengths[idx] for idx in indices]) for indices in indices_buckets[start_idx:end_idx]]
+        # print(f"rank={torch.distributed.get_rank()}, local_micro_batch_lengths={local_micro_batch_lengths}, sum={local_micro_batch_length_sum}")
+
         num_samples_global_micro_batch = [sum(len(local_micro_batches) for local_micro_batches in indices_buckets[i::num_local_buckets]) for i in range(0, num_local_buckets)]
         assert len(local_micro_batches) == len(num_samples_global_micro_batch)
-        return local_micro_batches, num_samples_global_micro_batch
+        return local_micro_batches, num_samples_global_micro_batch, next_cp_size
 
     # pre-determine sample arrangement within minibatch and number of micro batch 
     def predetermine_within_minibatch(self):
@@ -419,13 +437,13 @@ class SftConcatWithinBatchSampler:
 
         if len(batch) == self.global_batch_size or (len(batch) > 0 and not self.drop_last):
             # 根据样本长度搜索桶（buckets）
-            micro_batches, num_samples_global_micro_batch = self.search_for_buckets(batch)
+            micro_batches, num_samples_global_micro_batch, next_cp_size = self.search_for_buckets(batch)
             self.micro_batches_queue = micro_batches
             self.num_micro_batch = len(micro_batches)
             self.num_samples_global_micro_batch_queue = num_samples_global_micro_batch
             assert self.num_micro_batch == len(self.num_samples_global_micro_batch_queue)
             if mpu.is_pipeline_last_stage():
-                push_cached_num_microbatches(self.num_micro_batch)
+                push_cached_num_microbatches(self.num_micro_batch, next_cp_size)
         else:
             # 当前 epoch 没有更多批次
             self.micro_batches_queue = []
@@ -567,6 +585,8 @@ class MegatronPretrainingRandomSampler:
                 self.consumed_samples += self.micro_batch_times_data_parallel_size
                 yield batch
                 batch = []
+
+
 class MegatronSftRandomSampler:
 
     def __init__(self, dataset, total_samples, consumed_samples, micro_batch_size,

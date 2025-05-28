@@ -17,11 +17,8 @@ def build_num_microbatches_calculator(args):
     # Constant num micro-batches.
     if args.rampup_batch_size is None:
         num_microbatches_calculator = ConstantNumMicroBatches(
-            args.global_batch_size, args.micro_batch_size,
-            args.data_parallel_size // args.context_parallel_size)
-        if args.rank == 0:
-            print('setting number of micro-batches to constant {}'.format(
-                num_microbatches_calculator.get()), flush=True)
+            args.global_batch_size, args.micro_batch_size, args.data_parallel_size,
+        )
 
     else:
         assert len(args.rampup_batch_size) == 3, 'expected the following ' \
@@ -39,8 +36,8 @@ def build_num_microbatches_calculator(args):
                                                ramup_samples), flush=True)
         num_microbatches_calculator = RampupBatchsizeNumMicroBatches(
             start_batch_size, batch_size_increment, ramup_samples,
-            args.global_batch_size, args.micro_batch_size,
-            args.data_parallel_size // args.context_parallel_size)
+            args.global_batch_size, args.micro_batch_size, args.data_parallel_size,
+        )
 
     return num_microbatches_calculator
 
@@ -48,77 +45,97 @@ def build_num_microbatches_calculator(args):
 class NumMicroBatchesCalculator(ABC):
 
     def __init__(self):
-        self.num_micro_batches = None
+        self.micro_batch_size = None
+        self.data_parallel_size = None
         self.current_global_batch_size = None
 
     def get(self):
-        return self.num_micro_batches
+        # Avoid circular import
+        from megatron.core import mpu
+
+        data_parallel_size = self.data_parallel_size // mpu.get_context_parallel_world_size()
+        micro_batch_times_data_parallel = self.micro_batch_size * data_parallel_size
+        assert self.current_global_batch_size % micro_batch_times_data_parallel == 0, \
+            'global batch size ({}) is not divisible by micro batch size ({})' \
+            ' times data parallel size ({})'.format(self.current_global_batch_size,
+                                                    self.micro_batch_size,
+                                                    data_parallel_size)
+        num_micro_batches = self.current_global_batch_size // micro_batch_times_data_parallel
+        assert num_micro_batches >= 1
+        return num_micro_batches
 
     def get_current_global_batch_size(self):
         return self.current_global_batch_size
 
     @abstractmethod
-    def update(self, consumed_samples, consistency_check):
+    def update(self, consumed_samples):
         pass
 
 
 class ConstantNumMicroBatches(NumMicroBatchesCalculator):
 
     def __init__(self, global_batch_size, micro_batch_size, data_parallel_size):
-        micro_batch_times_data_parallel = micro_batch_size * \
-                                          data_parallel_size
-        assert global_batch_size % micro_batch_times_data_parallel == 0, \
-            'global batch size ({}) is not divisible by micro batch size ({})' \
-            ' times data parallel size ({})'.format(global_batch_size,
-                                                    micro_batch_size,
-                                                    data_parallel_size)
-        self.num_micro_batches = global_batch_size // \
-                                 micro_batch_times_data_parallel
-        assert self.num_micro_batches >= 1
+        self.micro_batch_size = micro_batch_size
+        self.data_parallel_size = data_parallel_size
         self.current_global_batch_size = global_batch_size
 
-    def update(self, consumed_samples, consistency_check):
+    def update(self, consumed_samples):
         pass
 
 class CachedNumMicroBatches(NumMicroBatchesCalculator):
 
     def __init__(self, device="cuda", dtype=torch.int64):
-        self.num_micro_batches_queue = None
+        self.num_micro_batches_and_cp_size_queue = None
         self.device = device
         self.dtype = dtype
-        # self.num_samples_global_batch_queue = deque()
         self.num_micro_batches = None
 
     def get(self):
         return self.num_micro_batches
 
-    def update(self, consumed_samples, consistency_check):
+    def update(self, consumed_samples):
         pass
 
-    def update_cache(self, incoming_num_micro_batch):
-        if self.num_micro_batches_queue is None:
-            self.num_micro_batches_queue = deque()
-        self.num_micro_batches_queue.append(incoming_num_micro_batch)
+    def update_cache(self, incoming_num_micro_batch, incoming_cp_size):
+        if self.num_micro_batches_and_cp_size_queue is None:
+            self.num_micro_batches_and_cp_size_queue = deque()
+        self.num_micro_batches_and_cp_size_queue.append((incoming_num_micro_batch, incoming_cp_size))
 
     def step(self, process_group=None):
         # -1 means no num microbathes will be pushed by this rank
         num_micro_batches = -1
-        if self.num_micro_batches_queue is not None:
-            num_micro_batches = self.num_micro_batches_queue.popleft()
+        cp_size = -1
+        if self.num_micro_batches_and_cp_size_queue is not None:
+            num_micro_batches, cp_size = self.num_micro_batches_and_cp_size_queue.popleft()
             assert num_micro_batches > 0
-        num_micro_batches = torch.tensor(num_micro_batches, dtype=self.dtype, device=self.device)
+            assert cp_size > 0
+        num_micro_batches_and_cp_size = torch.tensor([num_micro_batches, cp_size], dtype=self.dtype, device=self.device)
 
-        comm_buffer = torch.empty(dist.get_world_size(process_group), dtype=self.dtype, device=self.device)
+        comm_buffer = torch.empty([dist.get_world_size(process_group), 2], dtype=self.dtype, device=self.device)
 
         dist.all_gather_into_tensor(comm_buffer,
-                                    num_micro_batches,
+                                    num_micro_batches_and_cp_size,
                                     group=process_group)
 
-        num_micro_batches_set = set([num for num in comm_buffer.tolist() if num != -1])
+        num_micro_batches_buffer = comm_buffer[:, 0].contiguous()
+        cp_size_buffer = comm_buffer[:, 1].contiguous()
 
+        num_micro_batches_set = set([num for num in num_micro_batches_buffer.tolist() if num != -1])
         assert len(num_micro_batches_set) == 1, f"Expect unique number of microbatches, got {num_micro_batches}, please check data sampler for this inconsistency."
-
         self.num_micro_batches = num_micro_batches_set.pop()
+        
+        cp_size_set = set([num for num in cp_size_buffer.tolist() if num != -1])
+        assert len(cp_size_set) == 1, f"Expect unique cp size, got {cp_size_set}, please check data sampler for this inconsistency."
+        cp_size = cp_size_set.pop()
+        assert cp_size > 0
+
+         # Avoid circular import
+        from megatron.core import mpu
+        from megatron import print_rank_0
+
+        print_rank_0(f"Set cp_size to {cp_size}")
+        mpu.set_context_parallel_world_size(cp_size)
+        torch.cuda.empty_cache() # TODO(kunlunl): Is there a better way?
 
 
 class RampupBatchsizeNumMicroBatches(NumMicroBatchesCalculator):
@@ -143,9 +160,6 @@ class RampupBatchsizeNumMicroBatches(NumMicroBatchesCalculator):
 
         self.micro_batch_size = micro_batch_size
         self.data_parallel_size = data_parallel_size
-        self.micro_batch_times_data_parallel_size = self.micro_batch_size * \
-                                                    self.data_parallel_size
-        assert self.micro_batch_times_data_parallel_size > 0
         
         assert start_batch_size > 0
         self.start_batch_size = start_batch_size
@@ -166,10 +180,9 @@ class RampupBatchsizeNumMicroBatches(NumMicroBatchesCalculator):
         self.rampup_samples_per_increment = self.ramup_samples / num_increments
 
         # Initialize number of microbatches.
-        self.update(0, False)
+        self.update(0)
 
-
-    def update(self, consumed_samples, consistency_check):
+    def update(self, consumed_samples):
 
         if consumed_samples > self.ramup_samples:
             self.current_global_batch_size = self.global_batch_size
@@ -178,13 +191,3 @@ class RampupBatchsizeNumMicroBatches(NumMicroBatchesCalculator):
             self.current_global_batch_size = self.start_batch_size + \
                 steps * self.batch_size_increment
             assert self.current_global_batch_size <= self.global_batch_size
-
-        if consistency_check:
-            assert self.current_global_batch_size % \
-                self.micro_batch_times_data_parallel_size == 0, 'current global ' \
-                'batch size ({}) is not divisible by micro-batch-size ({}) times' \
-                'data parallel size ({})'.format(self.current_global_batch_size,
-                                                 self.micro_batch_size,
-                                                 self.data_parallel_size)
-        self.num_micro_batches = self.current_global_batch_size // \
-                                 self.micro_batch_times_data_parallel_size

@@ -41,7 +41,6 @@ def build_tokenizer(args):
         assert args.vocab_size is not None
         tokenizer = _NullTokenizer(args.vocab_size)
     elif args.tokenizer_type == 'NullTokenizerSft':
-    elif args.tokenizer_type == 'NullTokenizerSft':
         tokenizer = _NullTokenizerNotPlusOne(args.tokenizer_model)
     elif args.tokenizer_type == 'NullTokenizerPlusOne':
         tokenizer = _NullTokenizerPlusOne(args.tokenizer_model)    

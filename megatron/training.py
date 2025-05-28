@@ -123,11 +123,12 @@ def pretrain(train_valid_test_dataset_provider,
     timers('train/valid/test-data-iterators-setup', log_level=0).start(
         barrier=True)
     if args.virtual_pipeline_model_parallel_size is not None:
-        all_data_iterators = [
-            build_train_valid_test_data_iterators(
-                train_valid_test_dataset_provider)
-            for _ in range(len(model))
-        ]
+        all_data_iterators = []
+        for i in range(len(model)):
+            mpu.set_virtual_pipeline_model_parallel_rank(i)
+            all_data_iterators.append(
+                build_train_valid_test_data_iterators(train_valid_test_dataset_provider)
+            )
         train_data_iterator = [data_iterators[0]
                                for data_iterators in all_data_iterators]
         valid_data_iterator = [data_iterators[1]
@@ -194,11 +195,11 @@ def update_train_iters(args):
         consumed_samples = 0
         # Rampup phase.
         while consumed_samples <= int(args.rampup_batch_size[2]):
-            update_num_microbatches(consumed_samples, consistency_check=False)
+            update_num_microbatches(consumed_samples)
             consumed_samples += get_current_global_batch_size()
             iterations += 1
         # Reset
-        update_num_microbatches(0, consistency_check=False)
+        update_num_microbatches(0)
         # Constant phase
         # Note that we throw away any partial last batch.
         iterations += (args.train_samples - consumed_samples) // \
@@ -429,7 +430,11 @@ def train_step(forward_step_func, data_iterator,
         model=model,
         num_microbatches=get_num_microbatches(),
         dtype=args.params_dtype,
-        tensor_shape=(args.seq_length // args.context_parallel_size, args.micro_batch_size, args.hidden_size),
+        tensor_shape=(
+            args.seq_length // mpu.get_context_parallel_world_size(),
+            args.micro_batch_size,
+            args.hidden_size,
+        ),
         grad_scaler=optimizer.scale_loss,
         sequence_parallel=args.sequence_parallel,
         overlap_p2p_comm=args.overlap_p2p_comm,
@@ -472,7 +477,7 @@ def train_step(forward_step_func, data_iterator,
                     get_num_microbatches() * \
                     args.micro_batch_size * \
                     args.data_parallel_size // \
-                    args.context_parallel_size
+                    mpu.get_context_parallel_world_size()
         opt_param_scheduler.step(increment=increment)
         skipped_iter = 0
     else:
@@ -559,7 +564,7 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,num_microb
 
     # Calculate batch size.
     batch_size = args.micro_batch_size * \
-        (args.data_parallel_size // args.context_parallel_size) * \
+        (args.data_parallel_size // mpu.get_context_parallel_world_size()) * \
         num_microbatches if not args.sft_concat else args.global_batch_size
 
     total_iterations = total_loss_dict[advanced_iters_key] + \
@@ -747,8 +752,20 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
 
     timers('interval-time', log_level=0).start(barrier=True)
     print_datetime('before the start of training step')
-    report_memory_flag = 2
+    report_memory_flag = 10
     while iteration < args.train_iters:
+
+        # TODO(kunlunl): Remove this.
+        import os
+        set_random_cp_size = int(os.getenv('SET_RANDOM_CP_SIZE', '0'))
+        if set_random_cp_size == 1:
+            possible_cp_size = mpu.get_context_parallel_all_possible_world_sizes()
+            cp_size = possible_cp_size[iteration % len(possible_cp_size)]
+            print_rank_0(f"Set cp_size to {cp_size}")
+            mpu.set_context_parallel_world_size(cp_size)
+        else:
+            print_rank_0(f"Skip set random cp size, current cp size is {mpu.get_context_parallel_world_size()}")
+
         update_num_microbatches(args.consumed_train_samples)
         if args.sft_concat:
             step_cached_num_microbatches()

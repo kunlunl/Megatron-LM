@@ -6,8 +6,7 @@ set -euo pipefail
 
 TS=`date +%Y_%m_%d_%H_%M_%S`
 
-DATA_PATH=/workspace/hot-switch/Megatron-LM/dataset/github_subset_1.csv
-# TOKENIZER=/nlp_group/liupeng15/toxiansheng/tokenizer.128k.data_ratio/
+DATA_PATH=~/dataset/enwiki-100m_text_document
 TRAIN_ITERS=200
 
 if [ $GQA == "1" ]; then
@@ -61,18 +60,11 @@ GPT_ARGS="
 "
 
 DATA_ARGS="
-    --sft-dataset \
-    --sft-concat \
-    --data-impl mock \
-    --train-data-path $DATA_PATH \
-    --tokenizer-type NullTokenizerSft \
-    --dataloader-type cyclic \
-    --variable-seq-lengths \
+    --data-path $DATA_PATH \
+    --tokenizer-type NullTokenizer \
     --vocab-size 32004 \
     --split 949,50,1
 "
-# --tokenizer-model $TOKENIZER \
-# --sft-concat-mbs1 \
 
 OUTPUT_ARGS="
     --log-interval 1 \
@@ -116,7 +108,7 @@ mpirun --allow-run-as-root \
         -x TORCH_NCCL_AVOID_RECORD_STREAMS=1 \
         -x PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:21 \
         -x MASTER_ADDR=$MASTER_ADDR -x MASTER_PORT=6002 \
-    python3 ../../sft_gpt.py \
+    python3 ../../pretrain_gpt.py \
     --use-distributed-optimizer \
     --accumulate-allreduce-grads-in-fp32 \
     --initial-loss-scale 1 \
@@ -124,8 +116,6 @@ mpirun --allow-run-as-root \
     --tensor-model-parallel-size $TP \
     --sequence-parallel \
     --pipeline-model-parallel-size $PP \
-    --num-layers-per-virtual-pipeline-stage $PP_l \
-    --overlap-p2p-communication \
     --context-parallel-size $CP \
     --all-possible-context-parallel-sizes $ALL_CP \
     $CKPT_ARGS \
@@ -137,7 +127,8 @@ mpirun --allow-run-as-root \
     --no-context-parallel-comm-overlap-gemm \
     --kaimm-offload-activation-ratio $OFFLOAD_ALPHA \
     --kaimm-async-dataloader \
-    --prefetch-factor 64 \
+    --num-workers 0 \
+    --prefetch-factor 1 \
     $GPT_ARGS \
     $DATA_ARGS \
     $OUTPUT_ARGS \

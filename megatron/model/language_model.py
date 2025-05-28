@@ -401,9 +401,7 @@ class TransformerLanguageModel(MegatronModule):
             # partial rotary embeddings, which is better than full rotary
             # Wang and Komatsuzaki et al
             # https://github.com/kingoflolz/mesh-transformer-jax/
-            self.rotary_pos_emb = RotaryEmbedding(rotary_dim, args.rope_theta, args.use_fast_rope,
-                                                  mpu.get_context_parallel_world_size(),
-                                                  mpu.get_context_parallel_rank())
+            self.rotary_pos_emb = RotaryEmbedding(rotary_dim, args.rope_theta, args.use_fast_rope)
 
         # Encoder (usually set to True, False if part of an encoder-decoder
         # architecture and in encoder-only stage).
@@ -510,7 +508,11 @@ class TransformerLanguageModel(MegatronModule):
         if self.use_rotary_position_embeddings:
             if inference_params is not None:
                 rotary_pos_emb = \
-                    self.rotary_pos_emb(inference_params.max_sequence_len)
+                    self.rotary_pos_emb(
+                        inference_params.max_sequence_len,
+                        context_parallel_world_size=mpu.get_context_parallel_world_size(),
+                        context_parallel_rank=mpu.get_context_parallel_rank(),
+                    )
             else:
                 if encoder_input is not None:
                     seq_len = encoder_input.shape[0]
@@ -518,7 +520,12 @@ class TransformerLanguageModel(MegatronModule):
                     seq_len = self.encoder.input_tensor.shape[0]
                 if self.sequence_parallel:
                     seq_len *= mpu.get_tensor_model_parallel_world_size()
-                rotary_pos_emb = self.rotary_pos_emb(seq_len * mpu.get_context_parallel_world_size(), packing_info=packing_info)
+                rotary_pos_emb = self.rotary_pos_emb(
+                    seq_len * mpu.get_context_parallel_world_size(),
+                    packing_info=packing_info,
+                    context_parallel_world_size=mpu.get_context_parallel_world_size(),
+                    context_parallel_rank=mpu.get_context_parallel_rank(),
+                )
 
         # Run encoder.
         if enc_hidden_states is None:
