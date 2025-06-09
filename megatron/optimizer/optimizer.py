@@ -290,10 +290,11 @@ class MegatronOptimizer(ABC):
             timers('grads-all-reduce', log_level=1).start(
                 barrier=args.barrier_with_L1_time)
             for model in self.models:
-                model.allreduce_gradients()
+                model.allreduce_gradients(args)
             timers('grads-all-reduce').stop()
         else:
-            assert mpu.get_context_parallel_world_size() == 1, "need reduce_sum along CP group"
+            all_possible_cp_sizes = mpu.get_context_parallel_all_possible_world_sizes()
+            assert len(all_possible_cp_sizes) == 1 and all_possible_cp_sizes[0] == 1
 
         # All-reduce embedding grads.
         timers('embedding-grads-all-reduce', log_level=1).start(

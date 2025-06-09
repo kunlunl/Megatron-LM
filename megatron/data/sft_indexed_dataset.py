@@ -253,7 +253,17 @@ class MockSFTMMapIndexedDataset(torch.utils.data.Dataset):
         if isinstance(idx, slice):
             raise NotImplementedError(f"Using batch_sampler instead of sampler !!!")
 
-        if isinstance(idx, tuple):
+        if isinstance(idx, tuple) and len(idx) == 2:
+            idx, cp_size = idx
+
+            input_ids = np.ones(self.shape_list[idx], dtype=np.int64)
+            label_mask = np.ones(self.shape_list[idx], dtype=np.int64)
+
+            return dict(input_ids=input_ids,
+                        label_mask=label_mask,
+                        cp_size=cp_size)
+
+        elif isinstance(idx, tuple) and len(idx) == 5:
             idx, samples, split_num, partition_lengths, num_split_bucket_this_dp = idx
 
             input_ids = np.ones(self.shape_list[idx], dtype=np.int64)

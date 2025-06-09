@@ -53,6 +53,7 @@ class NumMicroBatchesCalculator(ABC):
         # Avoid circular import
         from megatron.core import mpu
 
+        # TODO(hot-switch): Don't use global variable.
         data_parallel_size = self.data_parallel_size // mpu.get_context_parallel_world_size()
         micro_batch_times_data_parallel = self.micro_batch_size * data_parallel_size
         assert self.current_global_batch_size % micro_batch_times_data_parallel == 0, \
@@ -96,46 +97,53 @@ class CachedNumMicroBatches(NumMicroBatchesCalculator):
     def update(self, consumed_samples):
         pass
 
-    def update_cache(self, incoming_num_micro_batch, incoming_cp_size):
+    def update_cache(self, incoming_num_micro_batch, incoming_cp_sizes):
         if self.num_micro_batches_and_cp_size_queue is None:
             self.num_micro_batches_and_cp_size_queue = deque()
-        self.num_micro_batches_and_cp_size_queue.append((incoming_num_micro_batch, incoming_cp_size))
+        self.num_micro_batches_and_cp_size_queue.append((incoming_num_micro_batch, incoming_cp_sizes))
 
     def step(self, process_group=None):
-        # -1 means no num microbathes will be pushed by this rank
+        from megatron.core import mpu # Avoid circular import
+
+        dp_size = mpu.get_data_parallel_world_size()
+        dp_rank = mpu.get_data_parallel_rank()
+
+        # -1 and None means no num microbathes will be pushed by this rank
         num_micro_batches = -1
-        cp_size = -1
+        cp_sizes_all_dp_ranks = None
         if self.num_micro_batches_and_cp_size_queue is not None:
-            num_micro_batches, cp_size = self.num_micro_batches_and_cp_size_queue.popleft()
+            num_micro_batches, cp_sizes_all_dp_ranks = self.num_micro_batches_and_cp_size_queue.popleft()
             assert num_micro_batches > 0
-            assert cp_size > 0
-        num_micro_batches_and_cp_size = torch.tensor([num_micro_batches, cp_size], dtype=self.dtype, device=self.device)
-
-        comm_buffer = torch.empty([dist.get_world_size(process_group), 2], dtype=self.dtype, device=self.device)
-
-        dist.all_gather_into_tensor(comm_buffer,
-                                    num_micro_batches_and_cp_size,
-                                    group=process_group)
-
-        num_micro_batches_buffer = comm_buffer[:, 0].contiguous()
-        cp_size_buffer = comm_buffer[:, 1].contiguous()
-
-        num_micro_batches_set = set([num for num in num_micro_batches_buffer.tolist() if num != -1])
+            assert len(cp_sizes_all_dp_ranks) == dp_size
+            for cp_sizes in cp_sizes_all_dp_ranks:
+                assert len(cp_sizes) == num_micro_batches
+        
+        # Check num_micro_batches is consistent.
+        num_micro_batches = torch.tensor([num_micro_batches], dtype=self.dtype, device=self.device)
+        comm_buffer = torch.empty([dist.get_world_size(process_group)], dtype=self.dtype, device=self.device)
+        dist.all_gather_into_tensor(comm_buffer, num_micro_batches, group=process_group)
+        num_micro_batches_set = set([num for num in comm_buffer.tolist() if num != -1])
         assert len(num_micro_batches_set) == 1, f"Expect unique number of microbatches, got {num_micro_batches}, please check data sampler for this inconsistency."
         self.num_micro_batches = num_micro_batches_set.pop()
-        
-        cp_size_set = set([num for num in cp_size_buffer.tolist() if num != -1])
-        assert len(cp_size_set) == 1, f"Expect unique cp size, got {cp_size_set}, please check data sampler for this inconsistency."
-        cp_size = cp_size_set.pop()
-        assert cp_size > 0
 
-         # Avoid circular import
-        from megatron.core import mpu
-        from megatron import print_rank_0
+        # Check cp_sizes is consistent.
+        if cp_sizes_all_dp_ranks is None:
+            cp_sizes_all_dp_ranks = [[-1] * self.num_micro_batches for _ in range(dp_size)]
+        cp_sizes_all_dp_ranks = torch.tensor(cp_sizes_all_dp_ranks, dtype=self.dtype, device=self.device)
+        world_size = dist.get_world_size(process_group)
+        comm_buffer = torch.empty([world_size, *cp_sizes_all_dp_ranks.shape], dtype=self.dtype, device=self.device)
+        dist.all_gather_into_tensor(comm_buffer, cp_sizes_all_dp_ranks, group=process_group)
+        first_non_empty_cp_sizes = None
+        for i in range(world_size):
+            if comm_buffer[i][0][0] != -1:
+                first_non_empty_cp_sizes = comm_buffer[i]
+        assert first_non_empty_cp_sizes is not None
+        for i in range(world_size):
+            if comm_buffer[i][0][0] != -1:
+                assert first_non_empty_cp_sizes.equal(comm_buffer[i])
 
-        print_rank_0(f"Set cp_size to {cp_size}")
-        mpu.set_context_parallel_world_size(cp_size)
-        torch.cuda.empty_cache() # TODO(kunlunl): Is there a better way?
+        # TODO(hot-switch): Is there a better way?
+        torch.cuda.empty_cache()
 
 
 class RampupBatchsizeNumMicroBatches(NumMicroBatchesCalculator):

@@ -66,14 +66,17 @@ def calc_params_l2_norm(model):
     return norm_2.item() ** 0.5
 
 
-def average_losses_across_data_parallel_group(losses):
+def average_losses_across_data_parallel_group(losses, micro_batch_size, cp_size):
     """Reduce a tensor of losses across all GPUs."""
-    averaged_losses = torch.cat(
-        [loss.clone().detach().view(1) for loss in losses])
-    torch.distributed.all_reduce(averaged_losses,
-                                 group=mpu.get_data_parallel_group())
-    averaged_losses = averaged_losses / \
-        torch.distributed.get_world_size(group=mpu.get_data_parallel_group())
+    # TODO(hot-switch): Double check if the printed loss is sufficiently representative.
+    comm_data_list = [loss.clone().detach().view(1) for loss in losses]
+    comm_data_list.append(torch.as_tensor(
+        [micro_batch_size], dtype=comm_data_list[0].dtype, device=comm_data_list[0].device)
+    )
+    comm_data = torch.cat(comm_data_list)
+    comm_data /= cp_size
+    torch.distributed.all_reduce(comm_data, group=mpu.get_data_parallel_group())
+    averaged_losses = comm_data[:-1] / comm_data[-1]
 
     return averaged_losses
 

@@ -879,12 +879,14 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         data_parallel_rank = mpu.get_data_parallel_rank()
         data_parallel_world_size = mpu.get_data_parallel_world_size()
         data_parallel_group = mpu.get_data_parallel_group()
-        context_parallel_world_size = mpu.get_context_parallel_world_size()
+        # TODO(hot-switch): Double check if the loss/gradient coefficient is correct.
+        # context_parallel_world_size = mpu.get_context_parallel_world_size()
 
         # Scale grad buffers by '1 / data_parallel_world_size'.
         for model in self.models:
             for dtype, gbuf in model._grad_buffers.items():
-                gbuf.data /= data_parallel_world_size // context_parallel_world_size
+                # gbuf.data /= data_parallel_world_size // context_parallel_world_size
+                gbuf.data /= args.global_batch_size
 
         # Reduce-scatter all grads.
         gbuf_view_items = self.get_model_grad_buffer_dp_views()

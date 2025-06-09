@@ -478,15 +478,24 @@ class TransformerLanguageModel(MegatronModule):
         else:
             raise Exception('Stage must have at least either encoder or decoder')
 
-    def forward(self, enc_input_ids, enc_position_ids, enc_attn_mask, packing_info=None,
-                dec_input_ids=None, dec_position_ids=None, dec_attn_mask=None,
+    def forward(self,
+                enc_input_ids,
+                enc_position_ids,
+                enc_attn_mask,
+                cp_size,
+                packing_info=None,
+                dec_input_ids=None,
+                dec_position_ids=None,
+                dec_attn_mask=None,
                 retriever_input_ids=None,
                 retriever_position_ids=None,
                 retriever_attn_mask=None,
-                enc_dec_attn_mask=None, tokentype_ids=None,
+                enc_dec_attn_mask=None,
+                tokentype_ids=None,
                 inference_params=None,
                 pooling_sequence_index=0,
-                enc_hidden_states=None, output_enc_hidden=False):
+                enc_hidden_states=None,
+                output_enc_hidden=False):
 
         # Encoder embedding.
         if self.pre_process:
@@ -506,12 +515,14 @@ class TransformerLanguageModel(MegatronModule):
         # Rotary positional embeddings
         rotary_pos_emb = None
         if self.use_rotary_position_embeddings:
+            cp_group = mpu.get_context_parallel_group(cp_size)
+            cp_rank = torch.distributed.get_rank(cp_group)
             if inference_params is not None:
                 rotary_pos_emb = \
                     self.rotary_pos_emb(
                         inference_params.max_sequence_len,
-                        context_parallel_world_size=mpu.get_context_parallel_world_size(),
-                        context_parallel_rank=mpu.get_context_parallel_rank(),
+                        context_parallel_world_size=cp_size,
+                        context_parallel_rank=cp_rank,
                     )
             else:
                 if encoder_input is not None:
@@ -521,10 +532,10 @@ class TransformerLanguageModel(MegatronModule):
                 if self.sequence_parallel:
                     seq_len *= mpu.get_tensor_model_parallel_world_size()
                 rotary_pos_emb = self.rotary_pos_emb(
-                    seq_len * mpu.get_context_parallel_world_size(),
+                    seq_len * cp_size,
                     packing_info=packing_info,
-                    context_parallel_world_size=mpu.get_context_parallel_world_size(),
-                    context_parallel_rank=mpu.get_context_parallel_rank(),
+                    context_parallel_world_size=cp_size,
+                    context_parallel_rank=cp_rank,
                 )
 
         # Run encoder.
@@ -533,6 +544,7 @@ class TransformerLanguageModel(MegatronModule):
                 encoder_output = self.encoder(
                     encoder_input,
                     enc_attn_mask,
+                    cp_size=cp_size,
                     packing_info=packing_info,
                     retriever_input=retriever_input,
                     retriever_attn_mask=retriever_attn_mask,
@@ -568,6 +580,7 @@ class TransformerLanguageModel(MegatronModule):
         decoder_output = self.decoder(
             decoder_input,
             dec_attn_mask,
+            cp_size=cp_size,
             encoder_output=encoder_output,
             enc_dec_attn_mask=enc_dec_attn_mask,
             inference_params=inference_params,

@@ -431,7 +431,8 @@ def train_step(forward_step_func, data_iterator,
         num_microbatches=get_num_microbatches(),
         dtype=args.params_dtype,
         tensor_shape=(
-            args.seq_length // mpu.get_context_parallel_world_size(),
+            # TODO(hot-switch): Didn't consider cp size here because the cp size of each microbatch is different.
+            args.seq_length if args.sft_concat else args.seq_length // mpu.get_context_parallel_world_size(),
             args.micro_batch_size,
             args.hidden_size,
         ),
@@ -473,11 +474,13 @@ def train_step(forward_step_func, data_iterator,
 
     # Update learning rate.
     if update_successful:
-        increment = args.global_batch_size if args.sft_concat else \
-                    get_num_microbatches() * \
-                    args.micro_batch_size * \
-                    args.data_parallel_size // \
-                    mpu.get_context_parallel_world_size()
+        # TODO(hot-switch): Can we only use args.global_batch_size for both pretrain and sft?
+        # increment = args.global_batch_size if args.sft_concat else \
+        #             get_num_microbatches() * \
+        #             args.micro_batch_size * \
+        #             args.data_parallel_size // \
+        #             mpu.get_context_parallel_world_size()
+        increment = args.global_batch_size
         opt_param_scheduler.step(increment=increment)
         skipped_iter = 0
     else:
@@ -563,9 +566,11 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,num_microb
         'optimizer']
 
     # Calculate batch size.
-    batch_size = args.micro_batch_size * \
-        (args.data_parallel_size // mpu.get_context_parallel_world_size()) * \
-        num_microbatches if not args.sft_concat else args.global_batch_size
+    # TODO(hot-switch): Can we only use args.global_batch_size for both pretrain and sft?
+    # batch_size = args.micro_batch_size * \
+    #     (args.data_parallel_size // mpu.get_context_parallel_world_size()) * \
+    #     num_microbatches if not args.sft_concat else args.global_batch_size
+    batch_size = args.global_batch_size
 
     total_iterations = total_loss_dict[advanced_iters_key] + \
                        total_loss_dict[skipped_iters_key]
@@ -700,7 +705,9 @@ def calculate_mfu(elapsed_time):
     H = args.ffn_hidden_size 
     V = args.padded_vocab_size
     t = mpu.get_tensor_model_parallel_world_size()
-    c = mpu.get_context_parallel_world_size()
+    # TODO(hot-switch): Find the correct way to handle cp size.
+    # c = mpu.get_context_parallel_world_size()
+    c = 1
     p = mpu.get_pipeline_model_parallel_world_size()
     d = mpu.get_data_parallel_world_size()
     T = elapsed_time
@@ -752,19 +759,17 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
 
     timers('interval-time', log_level=0).start(barrier=True)
     print_datetime('before the start of training step')
-    report_memory_flag = 10
+    report_memory_flag = 100
     while iteration < args.train_iters:
 
-        # TODO(kunlunl): Remove this.
+        # TODO(hot-switch): Remove this.
         import os
         set_random_cp_size = int(os.getenv('SET_RANDOM_CP_SIZE', '0'))
         if set_random_cp_size == 1:
             possible_cp_size = mpu.get_context_parallel_all_possible_world_sizes()
             cp_size = possible_cp_size[iteration % len(possible_cp_size)]
-            print_rank_0(f"Set cp_size to {cp_size}")
+            print_rank_0(f"Set cp_size randomly to {cp_size}")
             mpu.set_context_parallel_world_size(cp_size)
-        else:
-            print_rank_0(f"Skip set random cp size, current cp size is {mpu.get_context_parallel_world_size()}")
 
         update_num_microbatches(args.consumed_train_samples)
         if args.sft_concat:
@@ -783,10 +788,12 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
                            optimizer,
                            opt_param_scheduler)
         iteration += 1
-        args.consumed_train_samples += args.global_batch_size if args.sft_concat else \
-                                        mpu.get_data_parallel_for_sample_world_size() * \
-                                        args.micro_batch_size * \
-                                        get_num_microbatches()
+        # TODO(hot-switch): Can we only use args.global_batch_size for both pretrain and sft?
+        # args.consumed_train_samples += args.global_batch_size if args.sft_concat else \
+        #                                 mpu.get_data_parallel_for_sample_world_size() * \
+        #                                 args.micro_batch_size * \
+        #                                 get_num_microbatches()
+        args.consumed_train_samples += args.global_batch_size
 
         # Logging.
         loss_scale = optimizer.get_loss_scale().item()
@@ -885,6 +892,11 @@ def evaluate(forward_step_func,
         iteration = 0
         while iteration < args.eval_iters:
             iteration += 1
+
+            # TODO(hot-switch): Is step_cached_num_microbatches() needed for evaluation?
+            # if args.sft_concat:
+            #     step_cached_num_microbatches()
+
             if verbose and iteration % args.log_interval == 0:
                 print_rank_0('Evaluating iter {}/{}'.format(iteration,
                                                             args.eval_iters))
@@ -912,9 +924,11 @@ def evaluate(forward_step_func,
                         total_loss_dict[key] = total_loss_dict.get(
                             key, torch.cuda.FloatTensor([0.0])) + loss_dict[key]
 
-            args.consumed_valid_samples += mpu.get_data_parallel_for_sample_world_size() \
-                                           * args.micro_batch_size \
-                                           * get_num_microbatches()
+            # TODO(hot-switch): Should use args.global_batch_size here?
+            # args.consumed_valid_samples += mpu.get_data_parallel_for_sample_world_size() \
+            #                                * args.micro_batch_size \
+            #                                * get_num_microbatches()
+            args.consumed_valid_samples += args.global_batch_size
         collected_non_loss_data = None
         if process_non_loss_data_func is not None and is_last_rank():
             collected_non_loss_data = forward_backward_func(
