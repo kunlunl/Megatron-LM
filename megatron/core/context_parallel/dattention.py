@@ -38,7 +38,7 @@ def flip_cp(x, dim, world_size):
 
 # @torch.compile(dynamic=True)
 def mul_floordiv(x, multiplier, divisor):
-    # TODO(kunlunl): Remove this.
+    # TODO(hot-switch): Remove this after fixing the overflow bug.
     if isinstance(x, torch.Tensor) and x.dtype == torch.int32:
         x = x.to(torch.int64)
         x = x * multiplier // divisor
@@ -532,20 +532,23 @@ class ForwardGatherBackwardSliceFunction(torch.autograd.Function):
 
 
 def dattention(qi, ki, vi, cp_group, packing_info=None):
-    # TODO(kunlunl): Remove this.
-    # assert len(qi.shape) == 4
-    # assert len(ki.shape) == 4
-    # assert len(vi.shape) == 4
-    # assert qi.shape[1] == ki.shape[1]
-    # assert qi.shape[1] == vi.shape[1]
-    # cp_size = torch.distributed.get_world_size(cp_group)
-    # if cp_size > 1:
-    #     seqlen = torch.tensor([qi.shape[1]], dtype=torch.int64, device=qi.device)
-    #     comm_buffer = torch.empty([torch.distributed.get_world_size(cp_group)], dtype=torch.int64, device=qi.device)
-    #     torch.distributed.all_gather_into_tensor(comm_buffer, seqlen, group=cp_group)
-    #     seqlen_set = set([l for l in comm_buffer.tolist()])
-    #     assert len(seqlen_set) == 1, \
-    #         f"Expect unique seqlen, got {seqlen} on rank {torch.distributed.get_rank()}, cp rank {torch.distributed.get_rank(cp_group)}"
+    # TODO(hot-switch): For debug purpose, should be removed when officially released.
+    # -------------------------------Debug Block start-------------------------------
+    assert len(qi.shape) == 4
+    assert len(ki.shape) == 4
+    assert len(vi.shape) == 4
+    assert qi.shape[1] == ki.shape[1]
+    assert qi.shape[1] == vi.shape[1]
+    cp_size = torch.distributed.get_world_size(cp_group)
+    if cp_size > 1:
+        seqlen = torch.tensor([qi.shape[1]], dtype=torch.int64, device=qi.device)
+        comm_buffer = torch.empty([torch.distributed.get_world_size(cp_group)], dtype=torch.int64, device=qi.device)
+        torch.distributed.all_gather_into_tensor(comm_buffer, seqlen, group=cp_group)
+        seqlen_set = set([l for l in comm_buffer.tolist()])
+        assert len(seqlen_set) == 1, \
+            f"Expect unique seqlen, got {seqlen} on rank {torch.distributed.get_rank()}, cp rank {torch.distributed.get_rank(cp_group)}"
+    # -------------------------------Debug Block end-------------------------------
+
     if torch.distributed.get_world_size(cp_group) == 1:
         return flash_attn_func(qi, ki, vi, causal=True)
     kv = DAttentionPreFunction.apply(ki, vi, cp_group)

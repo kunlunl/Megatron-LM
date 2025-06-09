@@ -24,7 +24,6 @@ from megatron.core.parallel_state import (
     get_tensor_model_parallel_world_size,
     get_tensor_model_parallel_group,
     get_global_memory_buffer,
-    get_context_parallel_world_size,
     get_context_parallel_group,
     get_context_parallel_group_slow,
     get_global_te_user_buffer,
@@ -599,7 +598,7 @@ class LinearQKVWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
 
     @staticmethod
     @custom_fwd
-    def forward(ctx, input, weight, bias, gradient_accumulation_fusion,
+    def forward(ctx, input, weight, bias, cp_size, gradient_accumulation_fusion,
                 async_grad_allreduce, sequence_parallel, hidden_size_per_attention_head, k_pos_emb, ub_fw_obj,
                 recompute_norm, norm_weight, norm_eps, norm_zero_centered_gamma):
         ctx.recompute_norm = recompute_norm
@@ -618,6 +617,7 @@ class LinearQKVWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
         ctx.sequence_parallel = sequence_parallel
         ctx.main_grad = weight.main_grad
         ctx.ub_fw_obj = ub_fw_obj
+        ctx.cp_size = cp_size
 
         if sequence_parallel and ub_fw_obj is None:
             world_size = get_tensor_model_parallel_world_size()
@@ -643,7 +643,7 @@ class LinearQKVWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
         s, b, h = total_input.shape
         a = weight.shape[0] // 3 // hidden_size_per_attention_head
         d = hidden_size_per_attention_head
-        kv = torch.empty(2, s * get_context_parallel_world_size(), b, a, d, dtype=total_input.dtype, device=total_input.device)
+        kv = torch.empty(2, s * cp_size, b, a, d, dtype=total_input.dtype, device=total_input.device)
         weight_q, weight_k, weight_v = weight.view(3, a * d, h)
         if ctx.ub_fw_obj is None:
             vi = torch.matmul(total_input, weight_v.t()).view(s, b, a, d)
@@ -665,7 +665,7 @@ class LinearQKVWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
             )
             vi = vi.view(s, b, a, d)
         assert vi is not None and vi.is_contiguous()
-        handle = torch.distributed.all_gather_into_tensor(kv[1], vi, group=get_context_parallel_group(), async_op=True)
+        handle = torch.distributed.all_gather_into_tensor(kv[1], vi, group=get_context_parallel_group(cp_size), async_op=True)
         ki = torch.matmul(total_input, weight_k.t()).view(s, b, a, d)
         if k_pos_emb is not None:
             import fast_rotary_pos_emb
@@ -676,7 +676,7 @@ class LinearQKVWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
                 ki = ki.contiguous()
         handle.wait()
         assert ki.is_contiguous()
-        handle = torch.distributed.all_gather_into_tensor(kv[0], ki, group=get_context_parallel_group(), async_op=True)
+        handle = torch.distributed.all_gather_into_tensor(kv[0], ki, group=get_context_parallel_group(cp_size), async_op=True)
         qi = torch.matmul(total_input, weight_q.t()).view(s, b, a, d)
         handle.wait()
         return qi, kv
@@ -706,12 +706,12 @@ class LinearQKVWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
         assert grad_qi.is_contiguous()
         grad_ki = torch.empty_like(grad_qi)
         assert grad_k.is_contiguous()
-        handle = torch.distributed.reduce_scatter_tensor(grad_ki, grad_k, group=get_context_parallel_group(), async_op=True)
+        handle = torch.distributed.reduce_scatter_tensor(grad_ki, grad_k, group=get_context_parallel_group(ctx.cp_size), async_op=True)
         grad_input = grad_qi.view(s, b, a * d).matmul(weight_q)
         handle.wait()
         grad_vi = torch.empty_like(grad_qi)
         assert grad_v.is_contiguous()
-        handle = torch.distributed.reduce_scatter_tensor(grad_vi, grad_v, group=get_context_parallel_group(), async_op=True)
+        handle = torch.distributed.reduce_scatter_tensor(grad_vi, grad_v, group=get_context_parallel_group(ctx.cp_size), async_op=True)
         if k_pos_emb is not None:
             import fast_rotary_pos_emb
             grad_ki = fast_rotary_pos_emb.backward(grad_ki, k_pos_emb, True)
@@ -808,13 +808,14 @@ class LinearQKVWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
             grad_input, dgamma = tex_rmsnorm_bwd(grad_input, norm_input, norm_weight, rsigma, ctx.norm_zero_centered_gamma)
         else:
             dgamma = None
-        return grad_input, grad_weight, grad_bias, None, None, None, None, None, None, None, dgamma, None, None
+        return grad_input, grad_weight, grad_bias, None, None, None, None, None, None, None, None, dgamma, None, None
 
 
 def linear_qkv_with_grad_accumulation_and_async_allreduce(
     input: torch.Tensor,
     weight: torch.Tensor,
     bias: Optional[torch.Tensor],
+    cp_size: int,
     gradient_accumulation_fusion: bool,
     async_grad_allreduce: bool,
     sequence_parallel_enabled: bool,
@@ -828,6 +829,7 @@ def linear_qkv_with_grad_accumulation_and_async_allreduce(
         input,
         weight,
         bias,
+        cp_size,
         gradient_accumulation_fusion,
         async_grad_allreduce,
         sequence_parallel_enabled,
@@ -993,8 +995,7 @@ class ColumnParallelLinear(torch.nn.Module):
                 "cannot be enabled at the same time."
             )
 
-
-    def forward(self, input_, k_pos_emb=None, norm_input=None, norm_module=None):
+    def forward(self, input_, cp_size, k_pos_emb=None, norm_input=None, norm_module=None):
         """Forward of ColumnParallelLinear
 
         Args:
@@ -1021,13 +1022,14 @@ class ColumnParallelLinear(torch.nn.Module):
         if self.ub_args is not None:    
             name, shape, dtype, ag = self.ub_args["name"], self.ub_args["shape"], self.ub_args["dtype"], self.ub_args["ag"]
             assert len(shape) == 2
-            shape = [shape[0] // get_context_parallel_world_size(), shape[1]]
+            shape = [shape[0] // cp_size, shape[1]]
             ub_obj = get_global_te_user_buffer(name, shape, dtype, ag)
-        if self.cp_overlap and get_context_parallel_world_size() >= 2:
+        if self.cp_overlap and cp_size >= 2:
             output_parallel = linear_qkv_with_grad_accumulation_and_async_allreduce(
                 input=input_parallel,
                 weight=self.weight,
                 bias=bias,
+                cp_size=cp_size,
                 gradient_accumulation_fusion=self.gradient_accumulation_fusion,
                 async_grad_allreduce=self.async_tensor_model_parallel_allreduce,
                 sequence_parallel_enabled=self.sequence_parallel_enabled,
@@ -1038,9 +1040,21 @@ class ColumnParallelLinear(torch.nn.Module):
                 norm_module=norm_module,
             )
         else:
+            # TODO(hot-switch): This is just a workaround and it's not efficient. It introduces an
+            # extra transpose operation. Ideally, it's better to implement some other kernels that
+            # can work with the converted layout directly.
+            if self.cp_overlap:
+                unconverted_weight = self.weight.view(
+                    3, -1, self.hidden_size_per_attention_head, self.weight.shape[1]
+                ).transpose(0, 1).contiguous().reshape(self.weight.shape)
+                if hasattr(self.weight, "main_grad"):
+                    unconverted_weight.main_grad = self.weight.main_grad
+                weight_this_run = unconverted_weight
+            else:
+                weight_this_run = self.weight
             output_parallel = linear_with_grad_accumulation_and_async_allreduce(
                 input=input_parallel,
-                weight=self.weight,
+                weight=weight_this_run,
                 bias=bias,
                 gradient_accumulation_fusion=self.gradient_accumulation_fusion,
                 async_grad_allreduce=self.async_tensor_model_parallel_allreduce,
@@ -1173,9 +1187,7 @@ class RowParallelLinear(torch.nn.Module):
         else:
             self.register_parameter('bias', None)
 
-
-
-    def forward(self, input_, cp_data_to_save=None, cp_overlap_phase=None, recompute_mlp_activation_func=False, activation_func=None):
+    def forward(self, input_, cp_size, cp_data_to_save=None, cp_overlap_phase=None, recompute_mlp_activation_func=False, activation_func=None):
         """Forward of RowParallelLinear
 
         Args:
@@ -1198,12 +1210,12 @@ class RowParallelLinear(torch.nn.Module):
         if self.ub_fw_args is not None:
             fw_name, fw_shape, fw_dtype, fw_ag = self.ub_fw_args["name"], self.ub_fw_args["shape"], self.ub_fw_args["dtype"], self.ub_fw_args["ag"]
             assert len(fw_shape) == 2
-            fw_shape = [fw_shape[0] // get_context_parallel_world_size(), fw_shape[1]]
+            fw_shape = [fw_shape[0] // cp_size, fw_shape[1]]
             ub_fw_obj = get_global_te_user_buffer(fw_name, fw_shape, fw_dtype, fw_ag)
         if self.ub_bw_args is not None:
             bw_name, bw_shape, bw_dtype, bw_ag = self.ub_bw_args["name"], self.ub_bw_args["shape"], self.ub_bw_args["dtype"], self.ub_bw_args["ag"]
             assert len(bw_shape) == 2
-            bw_shape = [bw_shape[0] // get_context_parallel_world_size(), bw_shape[1]]
+            bw_shape = [bw_shape[0] // cp_size, bw_shape[1]]
             ub_bw_obj = get_global_te_user_buffer(bw_name, bw_shape, bw_dtype, bw_ag)
         output_parallel = linear_with_grad_accumulation_and_async_allreduce(
             input=input_parallel,
@@ -1228,7 +1240,9 @@ class RowParallelLinear(torch.nn.Module):
                 if cp_overlap_phase == 2:
                     cp_data_to_save_next = cp_data_to_save
                 elif cp_overlap_phase == 3:
-                    output_parallel = dattention.shard_save_for_backward(output_parallel, cp_data_to_save, group=get_context_parallel_group_slow())
+                    output_parallel = dattention.shard_save_for_backward(
+                        output_parallel, cp_data_to_save, group=get_context_parallel_group_slow(cp_size)
+                    )
                     cp_data_to_save_next = None
 
         # All-reduce across all the partitions.

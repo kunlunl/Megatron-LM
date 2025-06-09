@@ -387,25 +387,25 @@ def get_pipeline_model_parallel_group():
     return _PIPELINE_MODEL_PARALLEL_GROUP
 
 
-def get_context_parallel_group():
-    """Get the context parallel group the caller rank belongs to."""
+def get_context_parallel_group(cp_size):
+    """Get the context parallel group corresponding to the given cp_size."""
     assert _CONTEXT_PARALLEL_GROUP_DICT is not None, \
         'context parallel group dict is not initialized'
-    return _CONTEXT_PARALLEL_GROUP_DICT[get_context_parallel_world_size()]
+    return _CONTEXT_PARALLEL_GROUP_DICT[cp_size]
 
 
-def get_context_parallel_group_slow():
-    """Get the context parallel group-slow the caller rank belongs to."""
+def get_context_parallel_group_slow(cp_size):
+    """Get the context parallel slow group corresponding to the given cp_size."""
     assert _CONTEXT_PARALLEL_GROUP_SLOW_DICT is not None, \
         'context parallel group-slow dict is not initialized'
-    return _CONTEXT_PARALLEL_GROUP_SLOW_DICT[get_context_parallel_world_size()]
+    return _CONTEXT_PARALLEL_GROUP_SLOW_DICT[cp_size]
 
 
-def get_context_parallel_group_local():
-    """Get the context parallel group-local the caller rank belongs to."""
+def get_context_parallel_group_local(cp_size):
+    """Get the context parallel local group corresponding to the given cp_size."""
     assert _CONTEXT_PARALLEL_GROUP_LOCAL_DICT is not None, \
         'context parallel group-local dict is not initialized'
-    return _CONTEXT_PARALLEL_GROUP_LOCAL_DICT[get_context_parallel_world_size()]
+    return _CONTEXT_PARALLEL_GROUP_LOCAL_DICT[cp_size]
 
 
 def get_data_parallel_group():
@@ -454,6 +454,10 @@ def set_pipeline_model_parallel_world_size(world_size):
     global _MPU_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
     _MPU_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = world_size
 
+
+# TODO(hot-switch): There is a duplicate function below (search
+# "set_virtual_pipeline_model_parallel_world_size" to see it).
+# This one should be removed?
 def set_virtual_pipeline_model_parallel_world_size(world_size):
     """Set the pipeline model parallel size"""
     global _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE

@@ -17,6 +17,7 @@ from megatron.training import pretrain
 from megatron.utils import get_ltor_masks_and_position_ids
 from megatron.utils import average_losses_across_data_parallel_group
 
+
 def model_provider(pre_process=True, post_process=True):
     """Build the model."""
 
@@ -69,13 +70,16 @@ def get_batch(data_iterator):
 
     return tokens, labels, loss_mask, attention_mask, position_ids
 
-def loss_func(loss_mask, output_tensor):
+def loss_func(loss_mask, output_tensor, cp_size):
+    mbs = get_args().micro_batch_size
     losses = output_tensor.float()
     loss_mask = loss_mask.view(-1).float()
-    loss = torch.sum(losses.view(-1) * loss_mask) / loss_mask.sum()
+    # TODO(hot-switch): Double check if the loss coefficient is correct.
+    # Original: loss = torch.sum(losses.view(-1) * loss_mask) / loss_mask.sum()
+    loss = torch.sum(losses.view(-1) * loss_mask) / loss_mask.sum() * mbs
 
     # Reduce loss for logging.
-    averaged_loss = average_losses_across_data_parallel_group([loss])
+    averaged_loss = average_losses_across_data_parallel_group([loss], mbs, cp_size)
 
     return loss, {'lm loss': averaged_loss[0]}
 
@@ -91,10 +95,13 @@ def forward_step(data_iterator, model):
         data_iterator)
     timers('batch-generator').stop()
 
-    output_tensor = model(tokens, position_ids, attention_mask,
+    cp_size = mpu.get_context_parallel_world_size()
+    print(f"rank={torch.distributed.get_rank()}, using cp_size: {cp_size}")
+
+    output_tensor = model(tokens, position_ids, attention_mask, cp_size=cp_size,
                           labels=labels)
 
-    return output_tensor, partial(loss_func, loss_mask)
+    return output_tensor, partial(loss_func, loss_mask, cp_size=cp_size)
 
 
 def train_valid_test_datasets_provider(train_val_test_num_samples):

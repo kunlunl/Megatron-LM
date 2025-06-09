@@ -173,14 +173,23 @@ def perf_model_summary():
     for (name, fb), time_list in sorted(m.items()):
         time_list = torch.tensor(time_list[len(time_list) // 2:], dtype=torch.float32, device="cuda").mean()
         torch.distributed.all_reduce(time_list, op=torch.distributed.ReduceOp.SUM, group=mpu.get_tensor_model_parallel_group())
-        torch.distributed.all_reduce(time_list, op=torch.distributed.ReduceOp.SUM, group=mpu.get_context_parallel_group()) # TODO(kunlunl): What should be the correct cp_group?
+        # TODO(hot-switch): Find the correct way to handle cp size.
+        # torch.distributed.all_reduce(time_list, op=torch.distributed.ReduceOp.SUM, group=mpu.get_context_parallel_group())
         torch.distributed.all_reduce(time_list, op=torch.distributed.ReduceOp.MAX, group=mpu.get_data_parallel_group())
-        time_dict[name, fb] = time_list.item() / (mpu.get_tensor_model_parallel_world_size() * mpu.get_context_parallel_world_size()) # TODO(kunlunl): What should be the correct cp_size?
-    if mpu.get_context_parallel_rank() == 0 and mpu.get_tensor_model_parallel_rank() == 0 and mpu.get_data_parallel_rank() == 0:
+        # TODO(hot-switch): Find the correct way to handle cp size.
+        # time_dict[name, fb] = time_list.item() / (mpu.get_tensor_model_parallel_world_size() * mpu.get_context_parallel_world_size())
+        time_dict[name, fb] = time_list.item() / (mpu.get_tensor_model_parallel_world_size() * 1)
+    # TODO(hot-switch): Find the correct way to handle cp rank.
+    # if mpu.get_context_parallel_rank() == 0 and mpu.get_tensor_model_parallel_rank() == 0 and mpu.get_data_parallel_rank() == 0:
+    if mpu.get_tensor_model_parallel_rank() == 0 and mpu.get_data_parallel_rank() == 0:
         args = get_args()
+        # TODO(hot-switch): Find the correct way to handle cp size.
+        # line = f"{args.hidden_size} {args.ffn_hidden_size} {args.num_attention_heads} " + \
+        #     f"{args.group_query_attention} {args.num_query_groups} {args.num_layers} {args.seq_length} " + \
+        #     f"{args.tensor_model_parallel_size} {mpu.get_context_parallel_world_size()} {args.kaimm_overlap_cp_slow_ctas}"
         line = f"{args.hidden_size} {args.ffn_hidden_size} {args.num_attention_heads} " + \
             f"{args.group_query_attention} {args.num_query_groups} {args.num_layers} {args.seq_length} " + \
-            f"{args.tensor_model_parallel_size} {mpu.get_context_parallel_world_size()} {args.kaimm_overlap_cp_slow_ctas}"
+            f"{args.tensor_model_parallel_size} {1} {args.kaimm_overlap_cp_slow_ctas}"
         for name in ["emb", "L", "post"]:
             print(f"{name} {time_dict[name, 'forward']:.3f}+{time_dict[name, 'backward']:.3f}", end="    ")
             line += f" {name} {time_dict[name, 'forward']} {time_dict[name, 'backward']}"
