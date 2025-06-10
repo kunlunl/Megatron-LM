@@ -18,7 +18,7 @@ from megatron.core.msc_utils import MultiStorageClientFeature
 
 from . import ShardedTensor
 from .core import CheckpointingConfig, save_config
-from .dict_utils import extract_matching_values, merge, nested_values
+from .dict_utils import extract_matching_values, merge
 from .mapping import (
     CheckpointingException,
     CommonStateDict,
@@ -38,7 +38,7 @@ from .strategies.base import (
     StrategyAction,
     get_default_strategy,
 )
-from .utils import extract_sharded_base
+from .utils import extract_sharded_base, force_all_tensors_to_non_fp8
 from .validation import (
     StrictHandling,
     determine_global_metadata,
@@ -102,15 +102,20 @@ def load(
         StateDict or Tuple[StateDict, Set[str], Set[str]]: in most cases only
             the loaded state dict is returned. If `strict` flag was set to
     """
-    from ..fp8_utils import dequantize_fp8_tensor, is_float8tensor  # Avoid circular import
-
-    for v in nested_values(sharded_state_dict):
-        if hasattr(v, "data") and is_float8tensor(v.data):
-            v.data = dequantize_fp8_tensor(v.data)
-
     sharded_strategy, common_strategy = verify_checkpoint_and_load_strategy(
         checkpoint_dir, sharded_strategy, common_strategy
     )
+
+    # Dequantize all FP8 tensors in the state dict into their corresponding high-precision tensors.
+    # Retaining FP8 tensors in the state dict can cause issues in the following two cases:
+    #   1. Sometimes, when the precision of the checkpoint is higher than that of the model params,
+    #      we want to directly use the state dict to initialize the main params. If the FP8 tensors
+    #      in this sharded state dict are not converted to high-precision tensors, the loaded
+    #      tensors will already be quantized, which defeats the purpose of initializing the main
+    #      params with a high-precision state dict;
+    #   2. When using delayed scaling, this loading process writes an extra value into the global
+    #      amax_history buffer of Transformer Engine, which is undesirable.
+    force_all_tensors_to_non_fp8(sharded_state_dict)
 
     common_state_dict = common_strategy.load_common(checkpoint_dir)
 

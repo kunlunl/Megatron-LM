@@ -244,7 +244,16 @@ class MegatronOptimizer(ABC):
         Call whenever the parameters are changed outside of the optimizer.
         For example, when we load a model from a checkpoint  without loading
         the optimizer, the model parameters are updated but for fp16 optimizer
-        with main parameters, the main parameters need to also be updated."""
+        with main parameters, the main parameters need to also be updated.
+
+        Args:
+            state_dict (dict, optional): When it's not None, it means using
+                the params from the input state dict to initialize the main
+                params, instead of using the model params for initialization.
+                This is useful when the precision of the model params is lower
+                than that of the params in the state dict, as it allows the
+                main params to be more accurate.
+        """
         pass
 
     @abstractmethod
@@ -1084,7 +1093,15 @@ class ChainedOptimizer(MegatronOptimizer):
         else:
             return torch.tensor([1.0], dtype=torch.float32, device=torch.cuda.current_device())
 
-    def reload_model_params(self, state_dict=None):
+    def _split_state_dict(self, state_dict):
+        """Split the state dict into sub-state dicts according to the chunks of each sub-optimizer
+        in this chained optimizer.
+
+        For example, assume there are two sub-optimizers in total: the first has 1 model chunk, and
+        the second has 7 model chunks. The state dict contains model0 ~ model7. This function splits
+        the state dict into two sub-state dicts: the first contains model0, and the second contains
+        model1 ~ model7 (but renamed as model0 ~ model6).
+        """
         state_dicts = [None] * len(self.chained_optimizers)
         if state_dict is not None:
             if len(self.model_chunks) == 1:
@@ -1104,7 +1121,10 @@ class ChainedOptimizer(MegatronOptimizer):
                             offset += 1
                         if len(d) > 0:
                             state_dicts[optimizer_idx] = d
+        return state_dicts
 
+    def reload_model_params(self, state_dict=None):
+        state_dicts = self._split_state_dict(state_dict)
         for idx, optimizer in enumerate(self.chained_optimizers):
             optimizer.reload_model_params(state_dict=state_dicts[idx])
 

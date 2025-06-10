@@ -2098,6 +2098,42 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
 
                 shard_param_buffer.copy_(shard_main_param)
 
+    def _build_model_param_to_state_dict_param_map(self, state_dict):
+        """Create a map from model params to tensors in state_dict based on their names."""
+        state_dict_list = []
+        if "model0" in state_dict or "model_0" in state_dict:
+            # When there are multiple model chunks, the state_dict should have keys = "model0",
+            # "model1", "model2", etc (For NeMo, it's "model_0", "model_1", "model_2", etc).
+            prefix = "model" if "model0" in state_dict else "model_"
+            for i in range(len(self.model_chunks)):
+                k = f"{prefix}{i}"
+                assert k in state_dict, f"Wrong state_dict format, cannot find '{k}'"
+                state_dict_list.append(state_dict[k])
+        elif "model" in state_dict:
+            # When there is only one model chunk, the state_dict should have the key "model".
+            assert len(self.model_chunks) == 1
+            state_dict_list.append(state_dict["model"])
+        else:
+            assert len(self.model_chunks) == 1
+            state_dict_list.append(state_dict)
+
+        model_param_to_state_dict_param_map = {}
+        for chunk_idx, model_chunk in enumerate(self.model_chunks):
+            names_in_state_dict = set(state_dict_list[chunk_idx].keys())
+            for name, model_param in model_chunk.named_parameters():
+                while name.startswith("module."):
+                    name = name[len("module.") :]
+                matched_keys = [k for k in names_in_state_dict if name in k]
+                assert (
+                    len(matched_keys) == 1
+                ), f"Parameter {name} has {len(matched_keys)} matches in state dict"
+                state_dict_param = state_dict_list[chunk_idx][matched_keys[0]]
+                assert model_param.shape == state_dict_param.shape
+                model_param_to_state_dict_param_map[model_param] = state_dict_param
+                names_in_state_dict.remove(matched_keys[0])
+
+        return model_param_to_state_dict_param_map
+
     def _copy_model_params_to_main_params(self, state_dict=None):
         """
         Copy model params to main params.
@@ -2121,36 +2157,13 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             return
 
         if state_dict is not None:
-            state_dict_list = []
-            if "model0" in state_dict or "model_0" in state_dict:
-                # When there are multiple model chunks, the state_dict should have keys = "model0",
-                # "model1", "model2", etc (For NeMo, it's "model_0", "model_1", "model_2", etc).
-                prefix = "model" if "model0" in state_dict else "model_"
-                for i in range(len(self.model_chunks)):
-                    k = f"{prefix}{i}"
-                    assert k in state_dict, f"Wrong state_dict format, cannot find '{k}'"
-                    state_dict_list.append(state_dict[k])
-            elif "model" in state_dict:
-                assert len(self.model_chunks) == 1
-                state_dict_list.append(state_dict["model"])
-            else:
-                assert len(self.model_chunks) == 1
-                state_dict_list.append(state_dict)
-            # Create a map from model params to tensors in state_dict based on their names.
-            model_param_to_state_dict_param_map = {}
-            for chunk_idx, model_chunk in enumerate(self.model_chunks):
-                names_in_state_dict = set(state_dict_list[chunk_idx].keys())
-                for name, model_param in model_chunk.named_parameters():
-                    while name.startswith("module."):
-                        name = name[len("module.") :]
-                    matched_keys = [k for k in names_in_state_dict if name in k]
-                    assert (
-                        len(matched_keys) == 1
-                    ), f"Parameter {name} has {len(matched_keys)} matches in state dict"
-                    state_dict_param = state_dict_list[chunk_idx][matched_keys[0]]
-                    assert model_param.shape == state_dict_param.shape
-                    model_param_to_state_dict_param_map[model_param] = state_dict_param
-                    names_in_state_dict.remove(matched_keys[0])
+            # Build a mapping from the model params to the corresponding tensors in the state dict,
+            # so that whenever the model params are used to initialize the main params, they can be
+            # replaced by the corresponding tensors from the state dict to initialize the master
+            # weights.
+            model_param_to_state_dict_param_map = self._build_model_param_to_state_dict_param_map(
+                state_dict
+            )
 
         # Utility method for copying group params.
         def copy_group_params(model_groups, shard_main_groups):
