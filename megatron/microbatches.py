@@ -53,7 +53,7 @@ class NumMicroBatchesCalculator(ABC):
         # Avoid circular import
         from megatron.core import mpu
 
-        # TODO(hot-switch): Don't use global variable.
+        # TODO(hot-switch): Replace mpu.get_context_parallel_world_size() with a input argument?
         data_parallel_size = self.data_parallel_size // mpu.get_context_parallel_world_size()
         micro_batch_times_data_parallel = self.micro_batch_size * data_parallel_size
         assert self.current_global_batch_size % micro_batch_times_data_parallel == 0, \

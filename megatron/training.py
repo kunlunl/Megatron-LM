@@ -431,7 +431,8 @@ def train_step(forward_step_func, data_iterator,
         num_microbatches=get_num_microbatches(),
         dtype=args.params_dtype,
         tensor_shape=(
-            # TODO(hot-switch): Didn't consider cp size here because the cp size of each microbatch is different.
+            # TODO(hot-switch): Didn't consider cp size for sft because the cp size of each microbatch may be different.
+            # TODO(hot-switch): Replace mpu.get_context_parallel_world_size() with a input argument?
             args.seq_length if args.sft_concat else args.seq_length // mpu.get_context_parallel_world_size(),
             args.micro_batch_size,
             args.hidden_size,
