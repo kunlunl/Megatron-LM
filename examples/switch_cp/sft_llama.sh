@@ -141,4 +141,4 @@ mpirun --allow-run-as-root \
     $GPT_ARGS \
     $DATA_ARGS \
     $OUTPUT_ARGS \
-    2>&1 | tee logs/llama_$TS.txt
+    2>&1 | tee logs/llama_$TS.txt out.log

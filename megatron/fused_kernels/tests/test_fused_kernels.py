@@ -385,7 +385,7 @@ def test_fast_rotary_pos_emb_inner(dtype: torch.dtype, slice_input: bool, sq_axi
 
     rotary_pos_emb_ref = RotaryEmbedding(dim=hn).to(device).to(dtype)
     freqs_ref = rotary_pos_emb_ref(sq)
-    output_ref = apply_rotary_pos_emb(input, freqs_ref)
+    output_ref = apply_rotary_pos_emb(input, freqs_ref, cp_size=1)
     output_ref.backward(grad_output)
     d_input_ref = input.grad.clone()
 
@@ -393,7 +393,7 @@ def test_fast_rotary_pos_emb_inner(dtype: torch.dtype, slice_input: bool, sq_axi
 
     rotary_pos_emb = RotaryEmbedding(dim=hn, use_fast_rope=True).to(device).to(dtype)
     freqs = rotary_pos_emb(sq)
-    output = apply_rotary_pos_emb(input, freqs, use_fast_rope=True)
+    output = apply_rotary_pos_emb(input, freqs, cp_size=1, use_fast_rope=True)
     output.backward(grad_output)
     d_input = input.grad.clone()
 

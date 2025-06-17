@@ -79,8 +79,8 @@ class GPTModel(MegatronModule):
         """See megatron.model.transformer.set_input_tensor()"""
         self.language_model.set_input_tensor(input_tensor)
 
-    def forward(self, input_ids, position_ids, attention_mask, packing_info=None,
-                retriever_input_ids=None,
+    def forward(self, input_ids, position_ids, attention_mask, cp_size,
+                packing_info=None, retriever_input_ids=None,
                 retriever_position_ids=None,
                 retriever_attn_mask=None,
                 labels=None, tokentype_ids=None, inference_params=None):
@@ -90,12 +90,13 @@ class GPTModel(MegatronModule):
         else:
             total_seq_len = input_ids.shape[1]
         input_ids, position_ids, attention_mask, labels = \
-            slice_lm_inputs_along_cp(input_ids, position_ids, attention_mask, labels, packing_info=packing_info)
+            slice_lm_inputs_along_cp(input_ids, position_ids, attention_mask, labels, cp_size, packing_info=packing_info)
 
         lm_output = self.language_model(
             input_ids,
             position_ids,
             attention_mask,
+            cp_size,
             packing_info=packing_info,
             retriever_input_ids=retriever_input_ids,
             retriever_position_ids=retriever_position_ids,
@@ -107,7 +108,7 @@ class GPTModel(MegatronModule):
                 lm_output, labels,
                 self.language_model.output_layer.weight if self.untie_embeddings_and_output_weights else self.word_embeddings_weight(),
                 self.parallel_output,
-                self.fp16_lm_cross_entropy), total_seq_len=total_seq_len, packing_info=packing_info)
+                self.fp16_lm_cross_entropy), cp_size, total_seq_len=total_seq_len, packing_info=packing_info)
         else:
             return lm_output
 

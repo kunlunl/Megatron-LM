@@ -181,7 +181,7 @@ class CheckpointFunction(torch.autograd.Function):
               tracked/set/reset.
     """
     @staticmethod
-    def forward(ctx, run_function, distribute_saved_activations, packing_info, *args):
+    def forward(ctx, run_function, distribute_saved_activations, *args):
         ctx.run_function = run_function
         ctx.distribute_saved_activations \
             = distribute_saved_activations
@@ -192,7 +192,7 @@ class CheckpointFunction(torch.autograd.Function):
         ctx.fwd_cuda_rng_state_tracker = get_cuda_rng_tracker().get_states()
 
         with torch.no_grad():
-            outputs = run_function(*args, packing_info=packing_info)
+            outputs = run_function(*args)
 
         # Divide hidden states across model parallel group and only keep
         # the chunk corresponding to the current rank.
@@ -202,9 +202,24 @@ class CheckpointFunction(torch.autograd.Function):
                 args[0],
                 split_tensor_into_1d_equal_chunks(args[0].data, new_buffer=True))
 
+        # Split args into 2 groups, one for tensors and another for non-tensor args, also record
+        # their orders for re-ordering them back in backward pass.
+        # Doing this because ctx.save_for_backward only accepts tensors.
+        tensor_args, non_tensor_args = [], []
+        tensor_args_order, non_tensor_args_order = [], []
+        for i, arg in enumerate(args):
+            if isinstance(arg, torch.Tensor):
+                tensor_args.append(arg)
+                tensor_args_order.append(i)
+            else:
+                non_tensor_args.append(arg)
+                non_tensor_args_order.append(i)
+
         # Store everything.
-        ctx.save_for_backward(*args)
-        ctx.packing_info = packing_info
+        ctx.save_for_backward(*tensor_args)
+        ctx.tensor_args_order = tensor_args_order
+        ctx.non_tensor_args = non_tensor_args
+        ctx.non_tensor_args_order = non_tensor_args_order
 
         return outputs
 
@@ -213,7 +228,15 @@ class CheckpointFunction(torch.autograd.Function):
         if not torch.autograd._is_checkpoint_valid():
             raise RuntimeError("Checkpointing is not compatible with .grad(), "
                                "please use .backward() if possible")
-        inputs = ctx.saved_tensors
+
+        # Re-order the tensors and non-tensor args back to their original order.
+        tensor_inputs = ctx.saved_tensors
+        inputs = [None] * (len(ctx.tensor_args_order) + len(ctx.non_tensor_args_order))
+        for i, tensor_input in zip(ctx.tensor_args_order, tensor_inputs):
+            inputs[i] = tensor_input
+        for i, non_tensor_arg in zip(ctx.non_tensor_args_order, ctx.non_tensor_args):
+            inputs[i] = non_tensor_arg
+
         if ctx.distribute_saved_activations:
             safely_set_viewless_tensor_data(
                 inputs[0],
@@ -230,10 +253,10 @@ class CheckpointFunction(torch.autograd.Function):
         get_cuda_rng_tracker().set_states(ctx.fwd_cuda_rng_state_tracker)
 
         # Compute the forward pass.
-        detached_inputs = detach_variable(inputs)
-        packing_info = ctx.packing_info
+        detached_inputs = tuple(detach_variable((inp,))[0] if isinstance(inp, torch.Tensor) else inp
+                                for inp in inputs)
         with torch.enable_grad():
-            outputs = ctx.run_function(*detached_inputs, packing_info=packing_info)
+            outputs = ctx.run_function(*detached_inputs)
 
         # Set the states back to what it was at the start of this function.
         torch.set_rng_state(bwd_cpu_rng_state)
@@ -243,9 +266,9 @@ class CheckpointFunction(torch.autograd.Function):
         if isinstance(outputs, torch.Tensor):
             outputs = (outputs,)
         torch.autograd.backward(outputs, args)
-        grads = tuple(inp.grad if isinstance(inp, torch.Tensor) else inp
+        grads = tuple(inp.grad if isinstance(inp, torch.Tensor) else None
                       for inp in detached_inputs)
-        return (None, None, None) + grads
+        return (None, None) + grads
 
 
 def checkpoint(function, distribute_saved_activations, packing_info, *args):

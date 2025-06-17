@@ -124,7 +124,7 @@ mpirun --allow-run-as-root \
     --kaimm-cuda-synchronize-level 2 \
     --kaimm-gc-interval 9999 \
     --use-fast-rms-norm \
-    --no-context-parallel-comm-overlap-gemm \
+    --use-fast-rope \
     --kaimm-offload-activation-ratio $OFFLOAD_ALPHA \
     --kaimm-async-dataloader \
     --num-workers 0 \
@@ -132,4 +132,4 @@ mpirun --allow-run-as-root \
     $GPT_ARGS \
     $DATA_ARGS \
     $OUTPUT_ARGS \
-    2>&1 | tee logs/llama_$TS.txt
+    2>&1 | tee logs/llama_$TS.txt out.log

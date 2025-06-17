@@ -66,7 +66,6 @@ def build_pretraining_data_loader(dataset, consumed_samples):
         raise Exception('{} dataloader type is not supported.'.format(
                 args.dataloader_type))
 
-    # TODO(kunlunl) Remove this.
     prefetch_factor = args.prefetch_factor if args.num_workers > 0 else None
 
     # Torch dataloader.
@@ -187,14 +186,17 @@ class SampleConcatDataCollatorForSupervisedDataset(object):
 
         for more details, please refer to fused_kernels/fast_flip_cuda.cu:flip
         '''
-        divisor = np.lcm(4, mpu.get_tensor_model_parallel_world_size()) * 2 * mpu.get_context_parallel_world_size()
+        max_cp_size = sorted(mpu.get_context_parallel_all_possible_world_sizes())[-1]
+        divisor = np.lcm(4, mpu.get_tensor_model_parallel_world_size()) * 2 * max_cp_size
 
         all_input_ids = []
         all_label_mask = []
+        all_cp_sizes = []
 
         for i, instance in enumerate(instances):
             input_ids = instance["input_ids"]
             label_mask = instance["label_mask"]
+            cp_size = instance["cp_size"]
             # sequence length -1 for the last instance for label shift
             seq_len = input_ids.shape[0] - int(i == len(instances) - 1)
             padding = math.ceil(seq_len / divisor) * divisor - seq_len
@@ -203,15 +205,20 @@ class SampleConcatDataCollatorForSupervisedDataset(object):
                 label_mask = np.pad(label_mask, (0, padding), constant_values=0)
             all_input_ids.append(input_ids)
             all_label_mask.append(label_mask)
+            all_cp_sizes.append(cp_size)
 
         input_ids = np.concatenate(all_input_ids, axis=0)
         label_mask = np.concatenate(all_label_mask, axis=0)
         local_lengths = [i.shape[0] for i in all_input_ids]
 
+        assert len(set(all_cp_sizes)) == 1, "All cp sizes must be the same in a batch."
+        cp_size = all_cp_sizes[0]
+
         return dict(
             input_ids=torch.as_tensor(np.expand_dims(input_ids, axis=0)),
             label_mask=torch.as_tensor(np.expand_dims(label_mask, axis=0)),
-            sample_lengths=torch.as_tensor(local_lengths)
+            sample_lengths=torch.as_tensor(local_lengths),
+            cp_size=torch.as_tensor(cp_size),
         )
 
 
@@ -367,28 +374,17 @@ class SftConcatWithinBatchSampler:
         return [entry[1] for entry in list(buckets)], max([bucket[0] for bucket in buckets])
 
     def search_for_buckets(self, batch: List[int]):
+        # TODO(hot-switch): Replace with a better scheduler.
+
         lengths = self.dataset_sizes[batch]
-
-        # TODO(kunlunl): Remove this.
-        # Need to replace with real scheduler logic.
         possible_cp_sizes = sorted(mpu.get_context_parallel_all_possible_world_sizes())
-        if len(possible_cp_sizes) > 1:
-            max_length = self.dataset.max_length
-            max_length_this_batch = max(lengths)    
-            expected_length = max_length // possible_cp_sizes[-1]
-            for next_cp_size in possible_cp_sizes:
-                if max_length_this_batch // next_cp_size <= expected_length:
-                    break
-            print_rank_0(f"Choose next_cp_size to {next_cp_size}")
-        else:
-            next_cp_size = possible_cp_sizes[0]
+        dp_rank = mpu.get_data_parallel_rank()
+        dp_size = mpu.get_data_parallel_world_size()
 
-        dp_for_sample_rank = mpu.get_data_parallel_rank() // next_cp_size
-        dp_for_sample_size = mpu.get_data_parallel_world_size() // next_cp_size
-
+        # Calculate the initial division of buckets without cp.
         one_sample_per_bucket = get_args().sft_concat_mbs1
         i = 0
-        assert max(lengths) <= self.max_seq_len, f"dp sample rank: {dp_for_sample_rank}: Maximum sequence length in this batch of samples exceeds max_seq_len requirement."
+        assert max(lengths) <= self.max_seq_len, "Maximum sequence length in this batch exceeds max_seq_len requirement."
         while(True):
             i += 1
             if one_sample_per_bucket:
@@ -396,23 +392,63 @@ class SftConcatWithinBatchSampler:
                 indices_buckets, max_bucket_sum = self.solver(lengths, num_buckets)
                 break
             else:
-                num_buckets = i * dp_for_sample_size * mpu.get_pipeline_model_parallel_world_size()
+                num_buckets = i * dp_size * mpu.get_pipeline_model_parallel_world_size()
                 indices_buckets, max_bucket_sum = self.solver(lengths, num_buckets)
                 if max_bucket_sum <= self.max_seq_len:
                     break
-        num_local_buckets = len(indices_buckets) // dp_for_sample_size
-        start_idx = dp_for_sample_rank * num_local_buckets
-        end_idx = start_idx + num_local_buckets
-        local_micro_batches = [[batch[idx] for idx in indices] for indices in indices_buckets[start_idx:end_idx]]
+        num_local_buckets = len(indices_buckets) // dp_size
+        num_samples_global_micro_batch = [sum(len(indices) for indices in indices_buckets[i::num_local_buckets]) for i in range(0, num_local_buckets)]
+        micro_batches = []
+        for r in range(dp_size):
+            start_idx = r * num_local_buckets
+            end_idx = start_idx + num_local_buckets
+            micro_batches.append([[batch[idx] for idx in indices] for indices in indices_buckets[start_idx:end_idx]])
+            assert len(micro_batches[-1]) == len(num_samples_global_micro_batch)
 
-        # TODO(kunlunl): Remove this.
-        # local_micro_batch_lengths = [[lengths[idx] for idx in indices] for indices in indices_buckets[start_idx:end_idx]]
-        # local_micro_batch_length_sum = [sum([lengths[idx] for idx in indices]) for indices in indices_buckets[start_idx:end_idx]]
-        # print(f"rank={torch.distributed.get_rank()}, local_micro_batch_lengths={local_micro_batch_lengths}, sum={local_micro_batch_length_sum}")
+        # Prepare initial cp_size list and micro_batch_lengths.
+        cp_sizes = [[1] * len(num_samples_global_micro_batch) for _ in range(dp_size)]
+        micro_batch_lengths = []
+        for r in range(dp_size):
+            micro_batch_lengths.append([sum([self.dataset_sizes[sample_idx] for sample_idx in micro_batch]) for micro_batch in micro_batches[r]])
 
-        num_samples_global_micro_batch = [sum(len(local_micro_batches) for local_micro_batches in indices_buckets[i::num_local_buckets]) for i in range(0, num_local_buckets)]
-        assert len(local_micro_batches) == len(num_samples_global_micro_batch)
-        return local_micro_batches, num_samples_global_micro_batch, next_cp_size
+        # Merge buckets.
+        for micro_iter in range(len(num_samples_global_micro_batch)):
+            # Update cp_sizes.
+            for r in range(dp_size):
+                total_length = sum([self.dataset_sizes[sample_idx] for sample_idx in micro_batches[r][micro_iter]])
+                for cp_size in possible_cp_sizes:
+                    if total_length // cp_size <= self.max_seq_len // possible_cp_sizes[-1]:
+                        break
+                start = r // cp_size * cp_size
+                end = start + cp_size
+                for idx in range(start, end):
+                    cp_sizes[idx][micro_iter] = max(cp_size, cp_sizes[idx][micro_iter])
+
+            # Merge buckets and lengths.
+            r = 0
+            while r < dp_size:
+                cp_size = cp_sizes[r][micro_iter]
+                start = r
+                end = r + cp_size
+                merged_micro_batch = []
+                merged_length = 0
+                for idx in range(start, end):
+                    merged_micro_batch += micro_batches[idx][micro_iter]
+                    merged_length += sum([self.dataset_sizes[sample_idx] for sample_idx in micro_batches[idx][micro_iter]])
+                assert len(set(merged_micro_batch)) == len(merged_micro_batch)
+                for idx in range(start, end):
+                    micro_batches[idx][micro_iter] = [item for item in merged_micro_batch]
+                    micro_batch_lengths[idx][micro_iter] = merged_length // cp_size
+                r = end
+
+        # Put cp_size in the back of each micro batch.
+        micro_batches_this_rank = micro_batches[dp_rank]
+        cp_sizes_this_rank = cp_sizes[dp_rank]
+        for micro_batch, cp_size in zip(micro_batches_this_rank, cp_sizes_this_rank):
+            for i in range(len(micro_batch)):
+                micro_batch[i] = (micro_batch[i], cp_size)
+
+        return micro_batches_this_rank, num_samples_global_micro_batch, cp_sizes
 
     # pre-determine sample arrangement within minibatch and number of micro batch 
     def predetermine_within_minibatch(self):
@@ -437,13 +473,13 @@ class SftConcatWithinBatchSampler:
 
         if len(batch) == self.global_batch_size or (len(batch) > 0 and not self.drop_last):
             # 根据样本长度搜索桶（buckets）
-            micro_batches, num_samples_global_micro_batch, next_cp_size = self.search_for_buckets(batch)
+            micro_batches, num_samples_global_micro_batch, next_cp_sizes = self.search_for_buckets(batch)
             self.micro_batches_queue = micro_batches
             self.num_micro_batch = len(micro_batches)
             self.num_samples_global_micro_batch_queue = num_samples_global_micro_batch
             assert self.num_micro_batch == len(self.num_samples_global_micro_batch_queue)
             if mpu.is_pipeline_last_stage():
-                push_cached_num_microbatches(self.num_micro_batch, next_cp_size)
+                push_cached_num_microbatches(self.num_micro_batch, next_cp_sizes)
         else:
             # 当前 epoch 没有更多批次
             self.micro_batches_queue = []
@@ -467,7 +503,7 @@ class SftConcatWithinBatchSampler:
             else:
                 assert len(self.micro_batches_queue) == len(self.num_samples_global_micro_batch_queue)
                 for micro_batch, num_samples_global_micro_batch in zip(self.micro_batches_queue, self.num_samples_global_micro_batch_queue):
-                    token_lengths = [len(self.dataset[idx % self.total_samples]['input_ids']) for idx in micro_batch]
+                    token_lengths = [len(self.dataset[idx[0] % self.total_samples]['input_ids']) for idx in micro_batch]
                     self.total_trained_tokens += sum(token_lengths)
                     self.total_trained_tokens_power2 += sum(length ** 2 for length in token_lengths)
                     self.consumed_samples += num_samples_global_micro_batch

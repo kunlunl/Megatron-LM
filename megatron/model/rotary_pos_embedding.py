@@ -142,7 +142,7 @@ def apply_rotary_pos_emb_thd(t: Tensor, cu_seqlens: Tensor, freqs: Tensor) -> Te
 
 
 def apply_rotary_pos_emb(
-    t: Tensor, freqs: Tensor, cu_seqlens: Optional[Tensor] = None, use_fast_rope=False
+    t: Tensor, freqs: Tensor, cp_size: int, cu_seqlens: Optional[Tensor] = None, use_fast_rope=False
 ):
     """
     Reroute to the appropriate apply_rotary_pos_emb function depending on
@@ -151,13 +151,14 @@ def apply_rotary_pos_emb(
     # return t.contiguous()
 
     if use_fast_rope:
-        if cu_seqlens is None or mpu.get_context_parallel_world_size() > 1:
+        if cu_seqlens is None or cp_size > 1:
             return FastRotaryPosEmbFunction.apply(t, freqs, True)
         else:
             t = t.squeeze(1)
             return fused_apply_rotary_pos_emb_thd(t, cu_seqlens, freqs).unsqueeze(1)
     else:
-        if cu_seqlens is None or mpu.get_context_parallel_world_size() > 1:
+        # TODO(hot-switch): Why use apply_rotary_pos_emb_**bshd** for thd format when cp_size > 1?
+        if cu_seqlens is None or cp_size > 1:
             return apply_rotary_pos_emb_bshd(t, freqs)
         else:
             return apply_rotary_pos_emb_thd(t, cu_seqlens, freqs)
