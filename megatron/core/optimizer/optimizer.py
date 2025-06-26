@@ -247,12 +247,11 @@ class MegatronOptimizer(ABC):
         with main parameters, the main parameters need to also be updated.
 
         Args:
-            state_dict (dict, optional): When it's not None, it means using
-                the params from the input state dict to initialize the main
-                params, instead of using the model params for initialization.
-                This is useful when the precision of the model params is lower
-                than that of the params in the state dict, as it allows the
-                main params to be more accurate.
+            state_dict (dict, optional): When it is not None, we use the params
+                from the input state_dict to initialize the main params, instead
+                of using the model params for initialization. This is useful when
+                the precision of the model params is lower than that of the params
+                from the state dict, as it allows the main params to be more accurate.
         """
         pass
 
