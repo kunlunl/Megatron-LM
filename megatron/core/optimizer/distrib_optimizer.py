@@ -1734,112 +1734,118 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         if len(fp8_gbuf_indices) == 0:
             return
 
-        dtype_to_gbuf_idx = {}
+        # Check if the state_dict is already in fp8.
         for key in state_dict.keys():
             if key != 'buckets_coalesced':
-                for dtype in state_dict[key].keys():
-                    assert dtype not in dtype_to_gbuf_idx
-                    if dtype[0] == torch.uint8:
+                for param_dtype, _ in state_dict[key].keys():
+                    if param_dtype == torch.uint8:
                         # If the `state_dict`` already contains a torch.uint8 buffer, we assumed
                         # that the fp8 weights and fp16/bf16 biases in the checkpoint are already
                         # separated. In this case, no action is required, so we can return directly.
                         return
-                    dtype_to_gbuf_idx[dtype] = key
 
-        # 1. Replace the gbuf_idx in the checkpoint with the new gbuf_idx.
-        # 2. Copy the non-tensor data (i.e., the "buckets_coalesced") to `new_state_dict`.
-        new_state_dict = {'buckets_coalesced': state_dict['buckets_coalesced']}
-        for gbuf_idx, gbuf_range_maps in enumerate(self.gbuf_ranges):
-            for dtype, _ in gbuf_range_maps.items():
-                if not is_float8tensor(self.buffers[gbuf_idx].params[0]):
-                    new_state_dict[gbuf_idx] = state_dict[dtype_to_gbuf_idx[dtype]]
+        # Make sure the structure of state_dict is as expected.
+        assert 'buckets_coalesced' in state_dict
+        for i in range(len(state_dict) - 1):
+            assert i in state_dict
 
-        for fp8_gbuf_idx in fp8_gbuf_indices:
-            # Note that `self.buffers[fp8_gbuf_idx].params[0].dtype` is the dummy dtype of
-            # `Float8Tensor`, not torch.uint8.
-            non_fp8_param_and_grad_dtype = (
-                self.buffers[fp8_gbuf_idx].params[0].dtype,
-                self.buffers[fp8_gbuf_idx].grad_dtype,
-            )
-
-            # Iterate through all buffers to find the one that needs to be split.
-            non_fp8_gbuf_idx = None
-            for gbuf_idx, gbuf_range_maps in enumerate(self.gbuf_ranges):
-                for dtype, _ in gbuf_range_maps.items():
-                    if dtype == non_fp8_param_and_grad_dtype:
-                        non_fp8_gbuf_idx = gbuf_idx
-            assert non_fp8_gbuf_idx is not None
-
-            # We need the fp8_flags to determine the order of weight (fp8) and bias (fp16/bf16) in
-            # the buffer.
-            index_to_fp8_map = {}
-            for index in self.buffers[fp8_gbuf_idx].param_indices:
-                assert index not in index_to_fp8_map
-                index_to_fp8_map[index] = True
-            for index in self.buffers[non_fp8_gbuf_idx].param_indices:
-                assert index not in index_to_fp8_map
-                index_to_fp8_map[index] = False
-            param_indices = (
-                self.buffers[fp8_gbuf_idx].param_indices
-                + self.buffers[non_fp8_gbuf_idx].param_indices
-            )
-            assert min(param_indices) == 0
-            assert max(param_indices) == len(param_indices) - 1
-            fp8_flags = []
-            for i in range(len(param_indices)):
-                fp8_flags.append(index_to_fp8_map[i])
-
-            fp8_buffer = self.buffers[fp8_gbuf_idx]
-            non_fp8_buffer = self.buffers[non_fp8_gbuf_idx]
-
-            fp8_idx = len(fp8_buffer.params) - 1
-            non_fp8_idx = len(non_fp8_buffer.params) - 1
-            offsets, fp8_offsets, non_fp8_offsets = [0], [0], [0]
-
-            # Because the parameters in `_ParamAndGradBuffer` are traversed in reverse order, the
-            # flag here also needs to be traversed in reverse order.
-            for fp8_flag in fp8_flags[::-1]:
-                if fp8_flag:
-                    numel = fp8_buffer.params[fp8_idx].nelement()
-                    fp8_idx -= 1
-                    offsets.append(offsets[-1] + numel)
-                    fp8_offsets.append(fp8_offsets[-1] + numel)
+        # Try to match non-fp8 buffer and fp8 buffer.
+        # !!! Here we assume they are always adjacent because there is no enough information.
+        buffer_pairs = []
+        buffer_idx = 0
+        while buffer_idx < len(self.buffers):
+            if buffer_idx + 1 >= len(self.buffers):
+                # Make sure the remaining last buffer should not have any pair.
+                indices = self.buffers[buffer_idx].param_indices
+                for i in range(len(indices)):
+                    assert indices[i] == i
+                buffer_pairs.append((self.buffers[buffer_idx],))
+                buffer_idx += 1
+            else:
+                merged_indices = self.buffers[buffer_idx].param_indices + self.buffers[buffer_idx + 1].param_indices
+                if len(merged_indices) != len(set(merged_indices)):
+                    # If the merged indices are not unique, it means there should not be any pair.
+                    indices = self.buffers[buffer_idx].param_indices
+                    for i in range(len(indices)):
+                        assert indices[i] == i
+                    buffer_pairs.append((self.buffers[buffer_idx],))
+                    buffer_idx += 1
                 else:
-                    numel = non_fp8_buffer.params[non_fp8_idx].nelement()
-                    non_fp8_idx -= 1
-                    offsets.append(offsets[-1] + numel)
-                    non_fp8_offsets.append(non_fp8_offsets[-1] + numel)
+                    # If the merged indices are unique, it means there should be a pair.
+                    indices = sorted(merged_indices)
+                    for i in range(len(indices)):
+                        assert indices[i] == i
+                    buffer_pairs.append((self.buffers[buffer_idx], self.buffers[buffer_idx + 1]))
+                    buffer_idx += 2
 
-            # Split the target buffer into two separate buffers.
-            fp8_state_dict, non_fp8_state_dict = {}, {}
-            for key in ['param', 'exp_avg', 'exp_avg_sq']:
-                tensor = state_dict[non_fp8_gbuf_idx][non_fp8_param_and_grad_dtype][key]
-                fp8_tensor = torch.empty([fp8_offsets[-1]], dtype=tensor.dtype)
-                non_fp8_tensor = torch.empty([non_fp8_offsets[-1]], dtype=tensor.dtype)
+        # Make sure each item except "buckets_coalesced" from the state_dict has a corresponding buffer pair.
+        # !!! Here we assume they are in the same order because there is no enough information.
+        assert len(buffer_pairs) == len(state_dict) - 1
 
-                fp8_idx, non_fp8_idx = 0, 0
-                for i in range(len(offsets) - 1):
-                    if fp8_flags[-(i + 1)]:
-                        fp8_tensor[fp8_offsets[fp8_idx] : fp8_offsets[fp8_idx + 1]].copy_(
-                            tensor[offsets[i] : offsets[i + 1]]
-                        )
-                        fp8_idx += 1
-                    else:
-                        non_fp8_tensor[
-                            non_fp8_offsets[non_fp8_idx] : non_fp8_offsets[non_fp8_idx + 1]
-                        ].copy_(tensor[offsets[i] : offsets[i + 1]])
-                        non_fp8_idx += 1
+        splited_state_list = []
+        for pair_idx, pair in enumerate(buffer_pairs):
+            state = state_dict[pair_idx]
+            assert len(state) == 1
+            state = state[list(state.keys())[0]]
 
-                fp8_state_dict[key] = fp8_tensor
-                non_fp8_state_dict[key] = non_fp8_tensor
+            assert 'numel_unpadded' in state
+            keys = [key for key in state.keys() if key != 'numel_unpadded']
 
-            fp8_state_dict['numel_unpadded'] = fp8_offsets[-1]
-            non_fp8_state_dict['numel_unpadded'] = non_fp8_offsets[-1]
+            if len(pair) == 1:
+                splited_state_list.append(state)
+                continue
 
-            # Add the two separate buffers into `new_state_dict`.
-            new_state_dict[fp8_gbuf_idx] = {}
-            new_state_dict[fp8_gbuf_idx][(torch.uint8, fp8_buffer.grad_dtype)] = fp8_state_dict
-            new_state_dict[non_fp8_gbuf_idx][non_fp8_param_and_grad_dtype] = non_fp8_state_dict
+            num_params_per_buffer = [len(buffer.params) for buffer in pair]
+
+            num_total_params = sum(num_params_per_buffer)
+            assert num_total_params == max([buffer.param_indices[-1] for buffer in pair]) + 1
+
+            param_idx_to_buffer_idx = [None] * num_total_params
+            for buffer_idx, buffer in enumerate(pair):
+                for param_idx in buffer.param_indices:
+                    param_idx_to_buffer_idx[param_idx] = buffer_idx
+
+            total_num_elems = 0
+            splited_state_per_buffer = []
+            for buffer in pair:
+                num_elems = sum([param.nelement() for param in buffer.params])
+                splited_state = {'numel_unpadded': num_elems}
+                for key in keys:
+                    splited_state[key] = torch.empty(num_elems, dtype=state[key].dtype)
+                splited_state_per_buffer.append(splited_state)
+                total_num_elems += num_elems
+            assert total_num_elems == state['numel_unpadded']
+            
+            param_idx = num_total_params - 1
+            offset = 0
+            splited_param_idxs = [num_params - 1 for num_params in num_params_per_buffer]
+            splited_offsets = [0] * len(pair)
+
+            while param_idx >= 0:
+                # Step1: Get the current state, param idx and offset
+                buffer_idx = param_idx_to_buffer_idx[param_idx]
+                num_elems = pair[buffer_idx].params[splited_param_idxs[buffer_idx]].nelement()
+                splited_state = splited_state_per_buffer[buffer_idx]
+                splited_offset = splited_offsets[buffer_idx]
+                # Step 2: Copy the data from the original state to the splited state.
+                for key in keys:
+                    splited_state[key][splited_offset : splited_offset + num_elems].copy_(
+                        state[key][offset : offset + num_elems]
+                    )
+                # Step 3: Update param idx and offset.
+                param_idx -= 1
+                offset += num_elems
+                splited_param_idxs[buffer_idx] -= 1
+                splited_offsets[buffer_idx] += num_elems 
+
+            splited_state_list += splited_state_per_buffer
+
+        new_state_dict = {'buckets_coalesced': state_dict['buckets_coalesced']}
+        for buffer_idx, splited_state in enumerate(splited_state_list):
+            param_and_grad_dtype = (self.buffers[buffer_idx].params[0].dtype, self.buffers[buffer_idx].grad_dtype)
+            if is_float8tensor(self.buffers[buffer_idx].params[0]):
+                param_and_grad_dtype = (torch.uint8, param_and_grad_dtype[1])
+            new_state_dict[buffer_idx] = {param_and_grad_dtype: splited_state}
 
         # Inplace update state_dict
         state_dict.clear()
