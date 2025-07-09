@@ -79,11 +79,19 @@ class GPTModel(MegatronModule):
         """See megatron.model.transformer.set_input_tensor()"""
         self.language_model.set_input_tensor(input_tensor)
 
-    def forward(self, input_ids, position_ids, attention_mask, cp_size,
-                packing_info=None, retriever_input_ids=None,
+    def forward(self,
+                input_ids,
+                position_ids,
+                attention_mask,
+                cp_size,
+                recompute_methods,
+                packing_info=None,
+                retriever_input_ids=None,
                 retriever_position_ids=None,
                 retriever_attn_mask=None,
-                labels=None, tokentype_ids=None, inference_params=None):
+                labels=None,
+                tokentype_ids=None,
+                inference_params=None):
 
         if input_ids is None:
             total_seq_len = None
@@ -96,7 +104,8 @@ class GPTModel(MegatronModule):
             input_ids,
             position_ids,
             attention_mask,
-            cp_size,
+            cp_size=cp_size,
+            recompute_methods=recompute_methods,
             packing_info=packing_info,
             retriever_input_ids=retriever_input_ids,
             retriever_position_ids=retriever_position_ids,

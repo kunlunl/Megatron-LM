@@ -112,11 +112,12 @@ class ParallelMLP(MegatronModule):
     state back into h hidden dimension.
     """
 
-    def __init__(self, init_method, output_layer_init_method, 
+    def __init__(self,
+                 init_method,
+                 output_layer_init_method,
                  ub_fc1_fw_args = None, 
                  ub_fc2_fw_args = None, 
-                 ub_fc2_bw_args = None,
-                 recompute_mlp_activation_func=False):
+                 ub_fc2_bw_args = None):
         super(ParallelMLP, self).__init__()
         args = get_args()
 
@@ -167,15 +168,19 @@ class ParallelMLP(MegatronModule):
             ub_bw_args=ub_fc2_bw_args,
             **_args_to_kwargs())
 
-        self.recompute_mlp_activation_func = recompute_mlp_activation_func
-
-    def forward(self, hidden_states, cp_size, cp_data_to_save=None, norm_input=None, norm_module=None):
+    def forward(self,
+                hidden_states,
+                cp_size,
+                recompute_mlp_activation_func,
+                cp_data_to_save=None,
+                norm_input=None,
+                norm_module=None):
         # [s, b, 4hp]
         intermediate_parallel, bias_parallel = self.dense_h_to_4h(hidden_states,
                                                                   cp_size=cp_size,
                                                                   norm_input=norm_input,
                                                                   norm_module=norm_module)
-        if self.recompute_mlp_activation_func:
+        if recompute_mlp_activation_func:
             assert bias_parallel is None, "recompute_mlp_activation_func with bias_parallel is not implemented"
             assert self.bias_gelu_fusion is False, "activation recompute for sbias_gelu_fusion is not implemented"
         else:
@@ -192,7 +197,7 @@ class ParallelMLP(MegatronModule):
                                                                  cp_size=cp_size,
                                                                  cp_data_to_save=cp_data_to_save,
                                                                  cp_overlap_phase=3,
-                                                                 recompute_mlp_activation_func=self.recompute_mlp_activation_func,
+                                                                 recompute_mlp_activation_func=recompute_mlp_activation_func,
                                                                  activation_func = self.activation_func)
         return output, output_bias
 
@@ -208,7 +213,7 @@ class SwitchMLP(MegatronModule):
         for i in range(args.num_experts):
             self.experts.append(ParallelMLP(init_method, output_layer_init_method))
 
-    def forward(self, hidden_states, cp_size):
+    def forward(self, hidden_states, cp_size, recompute_mlp_activation_func):
         # hidden_states: [s, b, h]
         s = hidden_states.size(0)
         b = hidden_states.size(1)
@@ -232,7 +237,10 @@ class SwitchMLP(MegatronModule):
         for expert_num, expert in enumerate(self.experts):
             local_indices = (max_ind == expert_num).nonzero()
             hidden = hidden_states[local_indices,:]
-            output, output_bias = expert(hidden, cp_size=cp_size)
+            output, output_bias = expert(
+                hidden,
+                cp_size=cp_size,
+                recompute_mlp_activation_func=recompute_mlp_activation_func)
             output_bias = output_bias.expand_as(output)
             output_total[local_indices,:] = output
             output_bias_total[local_indices,:] = output_bias
@@ -629,7 +637,6 @@ class ParallelAttention(MegatronModule):
 
         self.core_attention = CoreAttention(self.layer_number,
                                             self.attn_mask_type)
-        self.checkpoint_core_attention = args.recompute_granularity == 'selective'
 
         if self.use_flash_attn and (
             (not self.cp_overlap) or (1 in mpu.get_context_parallel_all_possible_world_sizes())
@@ -682,9 +689,17 @@ class ParallelAttention(MegatronModule):
             dtype=self.params_dtype,
             device=torch.cuda.current_device())
 
-    def forward(self, hidden_states, attention_mask, cp_size,
-                encoder_output=None, inference_params=None,
-                rotary_pos_emb=None, norm_input=None, norm_module=None, packing_info=None):
+    def forward(self,
+                hidden_states,
+                attention_mask,
+                cp_size,
+                recompute_granularity,
+                encoder_output=None,
+                inference_params=None,
+                rotary_pos_emb=None,
+                norm_input=None,
+                norm_module=None,
+                packing_info=None):
         # hidden_states: [sq, b, h]
 
         # =================================================
@@ -858,7 +873,8 @@ class ParallelAttention(MegatronModule):
                                                     dim=2)
             value_layer = value_layer.repeat_interleave(int(self.num_attention_heads_per_partition / self.num_query_groups_per_partition),
                                                         dim=2)
-            if self.checkpoint_core_attention:
+            # TODO(hot-switch-recompute): Double check its correctness.
+            if recompute_granularity == 'selective':
                 context_layer = self._checkpointed_attention_forward(
                     query_layer, key_layer, value_layer, attention_mask)
             else:
@@ -971,7 +987,6 @@ class ParallelTransformerLayer(MegatronModule):
             output_layer_init_method = init_method
 
         # Layernorm on the input data.
-        self.recompute_norm = args.kaimm_recompute_norm
         if args.rms_norm:
             self.input_layernorm = RMSNorm(
                args.hidden_size,
@@ -1061,15 +1076,13 @@ class ParallelTransformerLayer(MegatronModule):
                     apply_layernorm_1p=args.apply_layernorm_1p)
 
         # MLP
-        self.recompute_mlp_activation_func = args.kaimm_recompute_mlp_activation_func
         if args.num_experts is not None:
             self.mlp = SwitchMLP(init_method, output_layer_init_method)
         else:
             self.mlp = ParallelMLP(init_method, output_layer_init_method,
                                    ub_fc1_fw_args=ub_fc1_fw_args,
                                    ub_fc2_fw_args=ub_fc2_fw_args,
-                                   ub_fc2_bw_args=ub_fc2_bw_args,
-                                   recompute_mlp_activation_func=self.recompute_mlp_activation_func)
+                                   ub_fc2_bw_args=ub_fc2_bw_args)
 
         # Set bias+dropout+add fusion grad_enable execution handler.
         TORCH_MAJOR = int(torch.__version__.split('.')[0])
@@ -1103,13 +1116,17 @@ class ParallelTransformerLayer(MegatronModule):
                                         enc_dec_attn_mask,
                                         layernorm_input,
                                         layernorm_output,
-                                        bias_dropout_add_func):
+                                        bias_dropout_add_func,
+                                        cp_size,
+                                        recompute_granularity):
         '''Cross attention for a standard encoder-decoder model.'''
 
         # Attention.
         attention_output, attention_bias = \
             self.inter_attention(layernorm_output,
                                  enc_dec_attn_mask,
+                                 cp_size=cp_size,
+                                 recompute_granularity=recompute_granularity,
                                  encoder_output=encoder_output)
 
         # Residual connection.
@@ -1138,7 +1155,9 @@ class ParallelTransformerLayer(MegatronModule):
                                       retriever_output,
                                       layernorm_input,
                                       layernorm_output,
-                                      bias_dropout_add_func):
+                                      bias_dropout_add_func,
+                                      cp_size,
+                                      recompute_granularity):
         """Cross attention for Retro encoder.
 
         Notation:
@@ -1172,6 +1191,8 @@ class ParallelTransformerLayer(MegatronModule):
                 self.inter_attention(
                     chunked_output, # Q (neighbor embedding)
                     None,
+                    cp_size=cp_size,
+                    recompute_granularity=recompute_granularity,
                     encoder_output=retriever_output) # K, V (hidden act)
 
             # Residual connection.
@@ -1211,7 +1232,9 @@ class ParallelTransformerLayer(MegatronModule):
                                       layernorm_input,
                                       layernorm_output,
                                       inference_params,
-                                      bias_dropout_add_func):
+                                      bias_dropout_add_func,
+                                      cp_size,
+                                      recompute_granularity):
         """Cross attention for Retro decoder.
 
         Notation:
@@ -1276,6 +1299,8 @@ class ParallelTransformerLayer(MegatronModule):
         attention_output, attention_bias = \
             self.inter_attention(padded_chunked_output,
                                  None,
+                                 cp_size=cp_size,
+                                 recompute_granularity=recompute_granularity,
                                  encoder_output=retriever_output)
 
         # Residual connection.
@@ -1310,6 +1335,9 @@ class ParallelTransformerLayer(MegatronModule):
                 hidden_states,
                 attention_mask,
                 cp_size,
+                recompute_norm,
+                recompute_mlp_activation_func,
+                recompute_granularity,
                 encoder_output=None,
                 enc_dec_attn_mask=None,
                 retriever_input=None,
@@ -1321,7 +1349,7 @@ class ParallelTransformerLayer(MegatronModule):
         # hidden_states: [s, b, h]
 
         # Layer norm at the beginning of the transformer layer.
-        if self.recompute_norm:
+        if recompute_norm:
             layernorm_output = None
         else:
             layernorm_output = self.input_layernorm(hidden_states)
@@ -1332,6 +1360,7 @@ class ParallelTransformerLayer(MegatronModule):
                 layernorm_output,
                 attention_mask,
                 cp_size=cp_size,
+                recompute_granularity=recompute_granularity,
                 packing_info=packing_info,
                 inference_params=inference_params,
                 rotary_pos_emb=rotary_pos_emb,
@@ -1372,7 +1401,7 @@ class ParallelTransformerLayer(MegatronModule):
             layernorm_input = residual + self.drop_path(out)
 
         # Layer norm post the self attention.
-        if self.recompute_norm:
+        if recompute_norm:
             layernorm_output = None
         else:
             layernorm_output = self.post_attention_layernorm(layernorm_input)
@@ -1381,7 +1410,7 @@ class ParallelTransformerLayer(MegatronModule):
         if self.layer_type == LayerType.encoder:
             pass
         elif self.layer_type == LayerType.decoder:
-            if self.recompute_norm:
+            if recompute_norm:
                 raise NotImplementedError("unsupported recompute norm in complex cases")
             layernorm_input, layernorm_output = \
                 self.default_decoder_cross_attention(
@@ -1391,7 +1420,7 @@ class ParallelTransformerLayer(MegatronModule):
                     layernorm_output,
                     bias_dropout_add_func)
         elif self.layer_type == LayerType.retro_encoder:
-            if self.recompute_norm:
+            if recompute_norm:
                 raise NotImplementedError("unsupported recompute norm in complex cases")
             layernorm_input, layernorm_output = \
                 self.retro_encoder_cross_attention(
@@ -1401,7 +1430,7 @@ class ParallelTransformerLayer(MegatronModule):
                     bias_dropout_add_func)
         elif self.layer_type in (LayerType.retro_decoder,
                                  LayerType.retro_decoder_with_retriever):
-            if self.recompute_norm:
+            if recompute_norm:
                 raise NotImplementedError("unsupported recompute norm in complex cases")
             retriever_output, layernorm_input, layernorm_output = \
                 self.retro_decoder_cross_attention(
@@ -1418,12 +1447,27 @@ class ParallelTransformerLayer(MegatronModule):
 
         # MLP.
         if cp_data_to_save is None:
-            mlp_output, mlp_bias = self.mlp(layernorm_output, cp_size, norm_input=layernorm_input, norm_module=self.post_attention_layernorm)
+            mlp_output, mlp_bias = self.mlp(
+                layernorm_output,
+                cp_size=cp_size,
+                recompute_mlp_activation_func=recompute_mlp_activation_func,
+                norm_input=layernorm_input,
+                norm_module=self.post_attention_layernorm)
         else:
-            if self.recompute_norm:
-                mlp_output, mlp_bias = self.mlp(layernorm_output, cp_size, cp_data_to_save, norm_input=layernorm_input, norm_module=self.post_attention_layernorm)
+            if recompute_norm:
+                mlp_output, mlp_bias = self.mlp(
+                    layernorm_output,
+                    cp_size=cp_size,
+                    recompute_mlp_activation_func=recompute_mlp_activation_func,
+                    cp_data_to_save=cp_data_to_save,
+                    norm_input=layernorm_input,
+                    norm_module=self.post_attention_layernorm)
             else:
-                mlp_output, mlp_bias = self.mlp(layernorm_output, cp_size, cp_data_to_save)
+                mlp_output, mlp_bias = self.mlp(
+                    layernorm_output,
+                    cp_size=cp_size,
+                    recompute_mlp_activation_func=recompute_mlp_activation_func,
+                    cp_data_to_save=cp_data_to_save)
 
         # Second residual connection.
         if self.apply_residual_connection_post_layernorm:
@@ -1588,11 +1632,6 @@ class ParallelTransformer(MegatronModule):
         self.retro_add_retriever = args.retro_add_retriever
 
         # Store activation checkpoiting flag.
-        self.recompute_granularity = args.recompute_granularity
-        self.recompute_method = args.recompute_method
-        self.recompute_num_layers = args.recompute_num_layers
-        if self.recompute_granularity == "full" and args.kaimm_cuda_synchronize_level >= 3:
-            raise NotImplementedError("Full recompute not supported for sync level 3")
         self.distribute_saved_activations = \
             args.distribute_saved_activations and not args.sequence_parallel
 
@@ -1632,7 +1671,6 @@ class ParallelTransformer(MegatronModule):
 
         self.num_microbatches_in_previous_step = -1
         self.microbatch_count = 0
-        self.checkpoint_core_attention = args.recompute_granularity == 'selective'
 
         # Number of layers.
         self.num_layers = _get_num_layers(args, model_type,
@@ -1652,8 +1690,6 @@ class ParallelTransformer(MegatronModule):
 
         # Transformer layers.
         if args.retro_add_retriever:
-            assert self.recompute_granularity != 'full', \
-                "Full recompute not supported for Retro."
             assert args.transformer_impl == 'local', \
                 "Transformer engine does not support Retro layers."
         def build_layer(layer_number):
@@ -1782,6 +1818,12 @@ class ParallelTransformer(MegatronModule):
                               hidden_states,
                               attention_mask,
                               cp_size,
+                              recompute_start_layer_idx,
+                              recompute_num_layers,
+                              recompute_method,
+                              recompute_norm,
+                              recompute_mlp_activation_func,
+                              recompute_granularity,
                               packing_info,
                               encoder_output,
                               enc_dec_attn_mask,
@@ -1803,66 +1845,106 @@ class ParallelTransformer(MegatronModule):
             if self.transformer_engine_rope_available:
                 te_forward_kwargs['rotary_pos_emb'] = rotary_pos_emb
 
-        if self.recompute_method == 'uniform':
+        start_layer = recompute_start_layer_idx
+        end_layer = start_layer + recompute_num_layers
+
+        if recompute_method == 'uniform':
             # Uniformly divide the total number of Transformer layers and
             # checkpoint the input activation of each divided chunk.
             # A method to further reduce memory usage reducing checkpoints.
-            l = 0
-            while l < self.num_layers:
-                if self.transformer_impl == 'transformer_engine':
-                    hidden_states = transformer_engine.pytorch.distributed.checkpoint(
-                        custom(l, l + self.recompute_num_layers),
-                        self.distribute_saved_activations,
-                        tensor_parallel.get_cuda_rng_tracker,
-                        mpu.get_tensor_model_parallel_group(),
-                        hidden_states, attention_mask, encoder_output,
-                        enc_dec_attn_mask, **te_forward_kwargs)
-                else:
-                    hidden_states = tensor_parallel.checkpoint(
-                        custom(l, l + self.recompute_num_layers),
-                        self.distribute_saved_activations,
-                        hidden_states, attention_mask, cp_size,
-                        encoder_output, enc_dec_attn_mask,
-                        None, None, None, None, rotary_pos_emb,
-                        packing_info)
+            if self.transformer_impl == 'transformer_engine':
+                hidden_states = transformer_engine.pytorch.distributed.checkpoint(
+                    custom(start_layer, end_layer),
+                    self.distribute_saved_activations,
+                    tensor_parallel.get_cuda_rng_tracker,
+                    mpu.get_tensor_model_parallel_group(),
+                    hidden_states,
+                    attention_mask,
+                    encoder_output,
+                    enc_dec_attn_mask,
+                    **te_forward_kwargs)
+            else:
+                hidden_states = tensor_parallel.checkpoint(
+                    custom(start_layer, end_layer),
+                    self.distribute_saved_activations,
+                    hidden_states,
+                    attention_mask,
+                    cp_size,
+                    recompute_norm,
+                    recompute_mlp_activation_func,
+                    recompute_granularity,
+                    encoder_output,
+                    enc_dec_attn_mask,
+                    None,
+                    None,
+                    None,
+                    None,
+                    rotary_pos_emb,
+                    packing_info)
 
-                l += self.recompute_num_layers
-
-        elif self.recompute_method == 'block':
+        elif recompute_method == 'block':
             # Checkpoint the input activation of only a set number of individual
             # Transformer layers and skip the rest.
             # A method fully use the device memory removing redundant re-computation.
-            for l in range(self.num_layers):
-                if l < self.recompute_num_layers:
-                    if self.transformer_impl == 'transformer_engine':
-                        hidden_states = transformer_engine.pytorch.distributed.checkpoint(
-                            custom(l, l + 1),
-                            self.distribute_saved_activations,
-                            tensor_parallel.get_cuda_rng_tracker,
-                            mpu.get_tensor_model_parallel_group(),
-                            hidden_states, attention_mask, encoder_output,
-                            enc_dec_attn_mask, **te_forward_kwargs)
-                    else:
-                        hidden_states = tensor_parallel.checkpoint(
-                            custom(l, l + 1),
-                            self.distribute_saved_activations,
-                            hidden_states, attention_mask, cp_size,
-                            encoder_output, enc_dec_attn_mask,
-                            None, None, None, None, rotary_pos_emb,
-                            packing_info)
-                else:
-                    if self.transformer_impl == 'transformer_engine':
-                        hidden_states = custom(l, l + 1)(
-                            hidden_states, attention_mask, encoder_output,
-                            enc_dec_attn_mask, **te_forward_kwargs)
-                    else:
-                        hidden_states = custom(l, l + 1)(
-                            hidden_states, attention_mask, cp_size,
-                            encoder_output, enc_dec_attn_mask,
-                            None, None, None, None, rotary_pos_emb,
-                            packing_info)
+            
+            # TODO(hot-switch-recompute): Double check if this is what we desire.
+            # TODO(hot-switch-recompute): Actually, we can unify it with the "uniform" case.
+            assert recompute_num_layers == 1
+
+            if self.transformer_impl == 'transformer_engine':
+                hidden_states = transformer_engine.pytorch.distributed.checkpoint(
+                    custom(start_layer, end_layer),
+                    self.distribute_saved_activations,
+                    tensor_parallel.get_cuda_rng_tracker,
+                    mpu.get_tensor_model_parallel_group(),
+                    hidden_states,
+                    attention_mask,
+                    encoder_output,
+                    enc_dec_attn_mask,
+                    **te_forward_kwargs)
+            else:
+                hidden_states = tensor_parallel.checkpoint(
+                    custom(start_layer, end_layer),
+                    self.distribute_saved_activations,
+                    hidden_states,
+                    attention_mask,
+                    cp_size,
+                    recompute_norm,
+                    recompute_mlp_activation_func,
+                    recompute_granularity,
+                    encoder_output,
+                    enc_dec_attn_mask,
+                    None,
+                    None,
+                    None,
+                    None,
+                    rotary_pos_emb,
+                    packing_info)
+        
         else:
-            raise ValueError("Invalid activation recompute method.")
+            if self.transformer_impl == 'transformer_engine':
+                hidden_states = custom(start_layer, end_layer)(
+                    hidden_states,
+                    attention_mask,
+                    encoder_output,
+                    enc_dec_attn_mask,
+                    **te_forward_kwargs)
+            else:
+                hidden_states = custom(start_layer, end_layer)(
+                    hidden_states,
+                    attention_mask,
+                    cp_size,
+                    recompute_norm,
+                    recompute_mlp_activation_func,
+                    recompute_granularity,
+                    encoder_output,
+                    enc_dec_attn_mask,
+                    None,
+                    None,
+                    None,
+                    None,
+                    rotary_pos_emb,
+                    packing_info)
 
         return hidden_states
 
@@ -1876,8 +1958,13 @@ class ParallelTransformer(MegatronModule):
         forward_step_func"""
         self.input_tensor = input_tensor
 
-    def forward(self, hidden_states, attention_mask, cp_size,
-                encoder_output=None, enc_dec_attn_mask=None,
+    def forward(self,
+                hidden_states,
+                attention_mask,
+                cp_size,
+                recompute_methods,
+                encoder_output=None,
+                enc_dec_attn_mask=None,
                 retriever_input=None,
                 retriever_output=None,
                 retriever_attn_mask=None,
@@ -1887,9 +1974,12 @@ class ParallelTransformer(MegatronModule):
         # hidden_states: [s, b, h]
 
         # Checks.
+        assert len(recompute_methods) == self.num_layers, \
+            "The number of recompute methods must be equal to the number of layers."
         if inference_params:
-            assert self.recompute_granularity is None, \
-                'inference does not work with activation checkpointing'
+            for method in recompute_methods:
+                assert method.recompute_granularity is None, \
+                    "Inference does not work with activation checkpointing."
 
         if not self.pre_process:
             # See set_input_tensor()
@@ -1938,42 +2028,61 @@ class ParallelTransformer(MegatronModule):
                 is_first_microbatch = self.microbatch_count % get_num_microbatches() == 0
 
                 # Forward pass.
-                if self.recompute_granularity == 'full':
-                    hidden_states = self._checkpointed_forward(hidden_states,
-                                                               attention_mask,
-                                                               cp_size,
-                                                               packing_info,
-                                                               encoder_output,
-                                                               enc_dec_attn_mask,
-                                                               rotary_pos_emb,
-                                                               is_first_microbatch)
-                else:
-                    forward_kwargs = {
-                        'encoder_output': encoder_output,
-                        'enc_dec_attn_mask': enc_dec_attn_mask,
-                        'inference_params': inference_params,
-                    }
-
-                    if self.transformer_impl == 'transformer_engine':
-                        forward_kwargs['is_first_microbatch'] = is_first_microbatch
-                        forward_kwargs['checkpoint_core_attention'] = self.checkpoint_core_attention
-                        if self.transformer_engine_rope_available:
-                            forward_kwargs['rotary_pos_emb'] = rotary_pos_emb
-                    else:
+                forward_kwargs = {
+                    'encoder_output': encoder_output,
+                    'enc_dec_attn_mask': enc_dec_attn_mask,
+                    'inference_params': inference_params,
+                }
+                if self.transformer_impl == 'transformer_engine':
+                    forward_kwargs['is_first_microbatch'] = is_first_microbatch
+                    if self.transformer_engine_rope_available:
                         forward_kwargs['rotary_pos_emb'] = rotary_pos_emb
-                        forward_kwargs['retriever_input'] = retriever_input
-                        forward_kwargs['retriever_output'] = retriever_output
-                        forward_kwargs['retriever_attn_mask'] = retriever_attn_mask
-                        forward_kwargs['cp_info'] = packing_info
-                        forward_kwargs['cp_size'] = cp_size
+                else:
+                    forward_kwargs['rotary_pos_emb'] = rotary_pos_emb
+                    forward_kwargs['retriever_input'] = retriever_input
+                    forward_kwargs['retriever_output'] = retriever_output
+                    forward_kwargs['retriever_attn_mask'] = retriever_attn_mask
+                    forward_kwargs['packing_info'] = packing_info
+                    forward_kwargs['cp_size'] = cp_size
 
-                    for index in range(self.num_layers):
-                        layer = self._get_layer(index)
+                args = get_args()
 
+                layer_idx = 0
+                while layer_idx < self.num_layers:
+                    if recompute_methods[layer_idx].recompute_granularity == "full" and args.kaimm_cuda_synchronize_level >= 3:
+                        raise NotImplementedError("Full recompute not supported for sync level 3")
+                    if args.retro_add_retriever:
+                        assert recompute_methods[layer_idx].recompute_granularity != 'full', "Full recompute not supported for Retro."
+
+                    if recompute_methods[layer_idx].recompute_granularity == 'full':
+                        hidden_states = self._checkpointed_forward(hidden_states,
+                                                                   attention_mask,
+                                                                   cp_size,
+                                                                   layer_idx,
+                                                                   recompute_methods[layer_idx].recompute_num_layers,
+                                                                   recompute_methods[layer_idx].recompute_method,
+                                                                   recompute_methods[layer_idx].recompute_norm,
+                                                                   recompute_methods[layer_idx].recompute_activations,
+                                                                   recompute_methods[layer_idx].recompute_granularity,
+                                                                   packing_info,
+                                                                   encoder_output,
+                                                                   enc_dec_attn_mask,
+                                                                   rotary_pos_emb,
+                                                                   is_first_microbatch)
+                    else: # recompute_granularity is "selective" or None
+                        if self.transformer_impl == 'transformer_engine':
+                            forward_kwargs['checkpoint_core_attention'] = recompute_methods[layer_idx].recompute_granularity == 'selective'
+                        else:
+                            forward_kwargs['recompute_norm'] = recompute_methods[layer_idx].recompute_norm
+                            forward_kwargs['recompute_mlp_activation_func'] = recompute_methods[layer_idx].recompute_activations
+                            forward_kwargs['recompute_granularity'] = recompute_methods[layer_idx].recompute_granularity
+
+                        layer = self._get_layer(layer_idx)
                         hidden_states = layer(
                             hidden_states,
                             attention_mask,
-                            **forward_kwargs)
+                            **forward_kwargs
+                        )
 
                         # First Retro decoder layer returns both hidden_states
                         # and retriever_output. Make retriever_output available
@@ -1983,9 +2092,12 @@ class ParallelTransformer(MegatronModule):
                             hidden_states, retriever_output = hidden_states
                             forward_kwargs["retriever_output"] = retriever_output
 
-                        if index < self.num_layers - 1:
+                        # TODO(hot-switch-recompute): Double check it, the sync_and_record is only in non-"full" path?
+                        if layer_idx < self.num_layers - 1:
                             cuda_sync_and_record(sync_level=3)
                             hidden_states = cuda_sync_and_record_at_backward(hidden_states, sync_level=3)
+
+                    layer_idx += recompute_methods[layer_idx].recompute_num_layers
 
                 # Skip counter update for eval and activation checkpointing
                 if torch.is_grad_enabled() and self.training:

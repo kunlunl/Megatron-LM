@@ -12,6 +12,7 @@ from megatron.core import parallel_state as mpu
 from megatron.core import tensor_parallel
 from megatron.core.enums import ModelType
 from megatron.data.gpt_dataset import build_train_valid_test_datasets
+from megatron.data.data_samplers import RecomputeMethod, get_recompute_method
 from megatron.model import GPTModel
 from megatron.training import pretrain
 from megatron.utils import get_ltor_masks_and_position_ids
@@ -96,10 +97,32 @@ def forward_step(data_iterator, model):
     timers('batch-generator').stop()
 
     cp_size = mpu.get_context_parallel_world_size()
-    print(f"rank={torch.distributed.get_rank()}, using cp_size: {cp_size}")
+    # print(f"rank={torch.distributed.get_rank()}, using cp_size: {cp_size}")
 
-    output_tensor = model(tokens, position_ids, attention_mask, cp_size=cp_size,
-                          labels=labels)
+    # TODO(hot-switch-recompute): Remove it.
+    num_layers = args.num_layers
+    recompute_args = [
+        {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": None,        "recompute_method": None,    },
+        {"recompute_norm": True,  "recompute_activations": False, "recompute_granularity": "selective", "recompute_method": None,    },
+        {"recompute_norm": False, "recompute_activations": True,  "recompute_granularity": "selective", "recompute_method": None,    },
+        {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": "full",      "recompute_method": "uniform"},
+        {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": "full",      "recompute_method": "block"  },
+    ]
+    recompute_methods = [RecomputeMethod(**recompute_args[i % len(recompute_args)]) for i in range(num_layers)]
+    pp_rank = mpu.get_pipeline_model_parallel_rank()
+    pp_size = mpu.get_pipeline_model_parallel_world_size()
+    vpp_rank = mpu.get_virtual_pipeline_model_parallel_rank()
+    vpp_size = mpu.get_virtual_pipeline_model_parallel_world_size()
+    recompute_methods_this_mbs = get_recompute_method(recompute_methods, pp_rank, pp_size, vpp_rank, vpp_size, args.num_layers_per_virtual_pipeline_stage, num_layers)
+
+    output_tensor = model(
+        tokens,
+        position_ids,
+        attention_mask,
+        cp_size=cp_size,
+        recompute_methods=recompute_methods_this_mbs,
+        labels=labels
+    )
 
     return output_tensor, partial(loss_func, loss_mask, cp_size=cp_size)
 

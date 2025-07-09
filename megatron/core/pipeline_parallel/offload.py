@@ -104,7 +104,9 @@ class ActivationGroup:
         self.hidden_size=get_args().hidden_size
         self.tensor_model_parallel_size=get_args().tensor_model_parallel_size
         self.num_layers_per_virtual_pipeline_stage = getattr(get_args(), 'num_layers_per_virtual_pipeline_stage', 1)
+        # TODO(hot-switch-recompute): Move it to forward?
         self.kaimm_recompute_mlp_activation_func=get_args().kaimm_recompute_mlp_activation_func
+        # TODO(hot-switch-recompute): Move it to forward?
         self.kaimm_recompute_norm=get_args().kaimm_recompute_norm
         self.kaimm_recompute_mlp_fc1=None
         self.variable_seq_lengths = get_args().variable_seq_lengths
@@ -134,8 +136,10 @@ class ActivationGroup:
         ratio = (39.6 + 4 / 128 + 8 / self.hidden_size)
         if self.micro_batch_size == 1:
             ratio = ratio - 2
+        # TODO(hot-switch-recompute): Get it from input?
         if self.kaimm_recompute_mlp_activation_func:
             ratio = ratio - (2 * 2.7 * 2)
+        # TODO(hot-switch-recompute): Get it from input?
         if self.kaimm_recompute_norm:
             ratio = ratio - (2 * 2)
         if self.kaimm_recompute_mlp_fc1:

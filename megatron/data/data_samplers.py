@@ -20,6 +20,58 @@ import os
 import heapq
 
 
+@dataclass
+class RecomputeMethod:
+
+    recompute_norm: bool = False
+    recompute_mlp_fc1: bool = False
+    recompute_activations: bool = False
+
+    recompute_granularity: str = None  # choices=['full', 'selective']
+    recompute_method: str = None  # choices=['uniform', 'block']
+    recompute_num_layers: int = 1
+
+
+def get_recompute_method(recompute_methods: List[RecomputeMethod],
+                         pp_rank: int,
+                         pp_size: int,
+                         vpp_rank: int,
+                         vpp_size: int,
+                         num_layers_per_vpp_stage: int,
+                         num_total_layers: int) -> List[RecomputeMethod]:
+    if vpp_rank is None or vpp_size is None:
+        # In case not using vpp.
+        vpp_rank = 0
+        vpp_size = 1
+        num_layers_per_vpp_stage = num_total_layers // pp_size
+
+    assert len(recompute_methods) == num_total_layers
+    assert len(recompute_methods) == pp_size * vpp_size * num_layers_per_vpp_stage
+
+    # TODO(hot-switch-recompute): Double check is there any other layout.
+    start = pp_size * num_layers_per_vpp_stage * vpp_rank + num_layers_per_vpp_stage * pp_rank
+    end = start + num_layers_per_vpp_stage
+    output = recompute_methods[start:end]
+
+    # TODO(hot-switch-recompute): Double check if it's correct.
+    i = 0
+    while i < len(output):
+        if output[i].recompute_granularity == 'full':
+            assert output[i].recompute_norm == False
+            assert output[i].recompute_mlp_fc1 == False
+            assert output[i].recompute_activations == False
+            if output[i].recompute_method == "uniform":
+                for j in range(1, output[i].recompute_num_layers):
+                    assert output[i] == output[i + j]
+            else:
+                assert output[i].recompute_num_layers == 1
+        else:
+            assert output[i].recompute_num_layers == 1
+        i += output[i].recompute_num_layers
+
+    return output
+
+
 def build_pretraining_data_loader(dataset, consumed_samples):
     """Buld dataloader given an input dataset."""
 
