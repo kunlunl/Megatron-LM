@@ -105,7 +105,7 @@ def forward_step(data_iterator, model):
     # TODO(hot-switch-recompute): Remove it.
     num_layers = args.num_layers
     set_random_recompute_args = int(os.getenv('SET_RANDOM_RECOMPUTE_ARGS', '0'))
-    if set_random_recompute_args != 0:
+    if set_random_recompute_args == 1:
         # print(f"rank={torch.distributed.get_rank()}, using random recompute args")
         recompute_args = [
             {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": "full",      "recompute_method": "uniform", "recompute_num_layers": 1},
@@ -132,9 +132,29 @@ def forward_step(data_iterator, model):
             {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": "full",      "recompute_method": "block",   "recompute_num_layers": 1},
             {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": "full",      "recompute_method": None,      "recompute_num_layers": 1},
         ]
+    elif set_random_recompute_args == 2:
+        recompute_args = [
+            {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": "full",      "recompute_method": "uniform", "recompute_num_layers": 1},
+            {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": "full",      "recompute_method": "uniform", "recompute_num_layers": 1},
+            {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": "full",      "recompute_method": "uniform", "recompute_num_layers": 1},
+            {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": "full",      "recompute_method": "uniform", "recompute_num_layers": 1},
+
+            {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": "full",      "recompute_method": "uniform", "recompute_num_layers": 1},
+            {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": "full",      "recompute_method": "uniform", "recompute_num_layers": 1},
+            {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": "full",      "recompute_method": "uniform", "recompute_num_layers": 1},
+            {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": None,        "recompute_method": None,      "recompute_num_layers": 1},
+        ]
+    elif set_random_recompute_args == 3:
+        recompute_args = [
+            {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": None,        "recompute_method": None,    },
+            {"recompute_norm": True,  "recompute_activations": False, "recompute_granularity": "selective", "recompute_method": None,    },
+            {"recompute_norm": False, "recompute_activations": True,  "recompute_granularity": "selective", "recompute_method": None,    },
+            {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": "full",      "recompute_method": "uniform"},
+            {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": "full",      "recompute_method": "block"  },
+        ]
     else:
         recompute_args = [
-            {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": None,        "recompute_method": None,      "recompute_num_layers": 1},
+            {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": "full",      "recompute_method": "uniform", "recompute_num_layers": 1},
         ]
     recompute_methods = [RecomputeMethod(**recompute_args[i % len(recompute_args)]) for i in range(num_layers)]
     pp_rank = mpu.get_pipeline_model_parallel_rank()
