@@ -17,9 +17,11 @@ export TP=1
 export CP=1
 export ALL_CP="1"
 export PP=8
-export PP_l=1
+export PP_l=2
 export CKPT=full
 export OFFLOAD_ALPHA=0.0
 export NUM_LAYERS=32
+
+export SET_RANDOM_RECOMPUTE_ARGS=1
 
 ./pretrain_llama.sh

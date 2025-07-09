@@ -1852,6 +1852,8 @@ class ParallelTransformer(MegatronModule):
             # Uniformly divide the total number of Transformer layers and
             # checkpoint the input activation of each divided chunk.
             # A method to further reduce memory usage reducing checkpoints.
+            assert end_layer <= len(self.layers), \
+                "uniform recompute num_layers is larger than num_layers per pp/vpp stage, Do you set vpp correctly?"
             if self.transformer_impl == 'transformer_engine':
                 hidden_states = transformer_engine.pytorch.distributed.checkpoint(
                     custom(start_layer, end_layer),

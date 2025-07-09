@@ -2,6 +2,7 @@
 
 """Pretrain GPT"""
 
+import os
 import torch
 from functools import partial
 from megatron import get_args
@@ -97,17 +98,44 @@ def forward_step(data_iterator, model):
     timers('batch-generator').stop()
 
     cp_size = mpu.get_context_parallel_world_size()
-    # print(f"rank={torch.distributed.get_rank()}, using cp_size: {cp_size}")
+    set_random_cp_size = int(os.getenv('SET_RANDOM_CP_SIZE', '0'))
+    if set_random_cp_size != 0:
+        print(f"rank={torch.distributed.get_rank()}, using cp_size: {cp_size}")
 
     # TODO(hot-switch-recompute): Remove it.
     num_layers = args.num_layers
-    recompute_args = [
-        {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": None,        "recompute_method": None,    },
-        {"recompute_norm": True,  "recompute_activations": False, "recompute_granularity": "selective", "recompute_method": None,    },
-        {"recompute_norm": False, "recompute_activations": True,  "recompute_granularity": "selective", "recompute_method": None,    },
-        {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": "full",      "recompute_method": "uniform"},
-        {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": "full",      "recompute_method": "block"  },
-    ]
+    set_random_recompute_args = int(os.getenv('SET_RANDOM_RECOMPUTE_ARGS', '0'))
+    if set_random_recompute_args != 0:
+        # print(f"rank={torch.distributed.get_rank()}, using random recompute args")
+        recompute_args = [
+            {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": "full",      "recompute_method": "uniform", "recompute_num_layers": 1},
+            {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": "full",      "recompute_method": "uniform", "recompute_num_layers": 1},
+
+            {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": "full",      "recompute_method": "uniform", "recompute_num_layers": 1},
+            {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": "full",      "recompute_method": "uniform", "recompute_num_layers": 1},
+
+            {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": "full",      "recompute_method": "uniform", "recompute_num_layers": 2},
+            {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": "full",      "recompute_method": "uniform", "recompute_num_layers": 2},
+
+            {"recompute_norm": True,  "recompute_activations": False, "recompute_granularity": "selective", "recompute_method": None,      "recompute_num_layers": 1},
+            {"recompute_norm": False, "recompute_activations": True,  "recompute_granularity": "selective", "recompute_method": None,      "recompute_num_layers": 1},
+
+            {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": None,        "recompute_method": None,      "recompute_num_layers": 1},
+            {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": "full",      "recompute_method": "uniform", "recompute_num_layers": 1},
+            
+            {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": "full",      "recompute_method": "block",   "recompute_num_layers": 1},
+            {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": "full",      "recompute_method": "uniform", "recompute_num_layers": 1},
+
+            {"recompute_norm": True,  "recompute_activations": False, "recompute_granularity": "selective", "recompute_method": None,      "recompute_num_layers": 1},
+            {"recompute_norm": False, "recompute_activations": True,  "recompute_granularity": "selective", "recompute_method": None,      "recompute_num_layers": 1},
+
+            {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": "full",      "recompute_method": "block",   "recompute_num_layers": 1},
+            {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": "full",      "recompute_method": None,      "recompute_num_layers": 1},
+        ]
+    else:
+        recompute_args = [
+            {"recompute_norm": False, "recompute_activations": False, "recompute_granularity": None,        "recompute_method": None,      "recompute_num_layers": 1},
+        ]
     recompute_methods = [RecomputeMethod(**recompute_args[i % len(recompute_args)]) for i in range(num_layers)]
     pp_rank = mpu.get_pipeline_model_parallel_rank()
     pp_size = mpu.get_pipeline_model_parallel_world_size()
