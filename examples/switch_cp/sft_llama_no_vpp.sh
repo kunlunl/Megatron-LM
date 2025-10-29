@@ -6,9 +6,15 @@ set -euo pipefail
 
 TS=`date +%Y_%m_%d_%H_%M_%S`
 
-DATA_PATH=/workspace/hot-switch/Megatron-LM/dataset/github_subset_1.csv
+if [ -n "${PROFILE_BATCH_LOOPS:-}" ]; then
+    echo "PROFILE_BATCH_LOOPS: $PROFILE_BATCH_LOOPS"
+    python3 update_subset_2.py $SEQ_LENGTH $PROFILE_BATCH_LOOPS $TRAIN_ITERS $GLOBAL_BATCH_SIZE
+else
+    cp /workspace/hot-switch/dataset/github_subset_1.csv /workspace/hot-switch/dataset/github_subset_2.csv
+fi
+
+DATA_PATH=/workspace/hot-switch/dataset/github_subset_2.csv
 # TOKENIZER=/nlp_group/liupeng15/toxiansheng/tokenizer.128k.data_ratio/
-TRAIN_ITERS=200
 
 if [ $GQA == "1" ]; then
     GQA_ARGS="--group-query-attention --num-query-groups $NUM_QUERY_GROUPS --no-context-parallel-comm-overlap-gemm"
@@ -126,6 +132,7 @@ mpirun --allow-run-as-root \
     --pipeline-model-parallel-size $PP \
     --context-parallel-size $CP \
     --all-possible-context-parallel-sizes $ALL_CP \
+    --kaimm-profile-analysis \
     $CKPT_ARGS \
     $TP_OVERLAP_ARGS \
     --kaimm-overlap-cp-slow-ctas 4 \
@@ -139,4 +146,4 @@ mpirun --allow-run-as-root \
     $GPT_ARGS \
     $DATA_ARGS \
     $OUTPUT_ARGS \
-    2>&1 | tee logs/llama_$TS.txt
+    2>&1 | tee logs/llama_$TS.txt out.log

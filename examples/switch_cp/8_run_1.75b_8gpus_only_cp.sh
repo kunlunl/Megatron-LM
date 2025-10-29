@@ -6,19 +6,22 @@ set -euo pipefail
 
 source ./llama-7b
 
-export SEQ_LENGTH=102400
-export GLOBAL_BATCH_SIZE=16
+export SEQ_LENGTH=34000
+export GLOBAL_BATCH_SIZE=64
 
 export HOSTFILE=
 export MASTER_ADDR=127.0.0.1
 export NUM_GPUS=8
 
 export TP=1
-export CP=8
-export ALL_CP="1,2,4,8"
+export CP=1
+export ALL_CP="1"
 export PP=1
 export CKPT=full
 export OFFLOAD_ALPHA=0.0
 export NUM_LAYERS=8
+
+export PROFILE_BATCH_LOOPS=10
+export TRAIN_ITERS=2000
 
 ./sft_llama_no_vpp.sh

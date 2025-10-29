@@ -1964,7 +1964,7 @@ class ParallelTransformer(MegatronModule):
                         forward_kwargs['retriever_input'] = retriever_input
                         forward_kwargs['retriever_output'] = retriever_output
                         forward_kwargs['retriever_attn_mask'] = retriever_attn_mask
-                        forward_kwargs['cp_info'] = packing_info
+                        forward_kwargs['packing_info'] = packing_info
                         forward_kwargs['cp_size'] = cp_size
 
                     for index in range(self.num_layers):

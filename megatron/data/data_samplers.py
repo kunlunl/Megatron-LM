@@ -448,6 +448,21 @@ class SftConcatWithinBatchSampler:
             for i in range(len(micro_batch)):
                 micro_batch[i] = (micro_batch[i], cp_size)
 
+        print(f"rank={dp_rank}, micro_batches_this_rank: {micro_batches_this_rank}")
+        flatten_data_sizes = []
+        seqlens_to_write = []
+        for micro_batch in micro_batches_this_rank:
+            seqlens_to_write.append([])
+            for i in range(len(micro_batch)):
+                flatten_data_sizes.append(self.dataset_sizes[micro_batch[i][0]])
+                seqlens_to_write[-1].append(self.dataset_sizes[micro_batch[i][0]])
+        print(f'rank={dp_rank}, micro_batches_this_rank_sizes: {flatten_data_sizes}')
+        with open(f"seqlens_dp{dp_rank}.txt", "a") as f:
+            for seqlens in seqlens_to_write:
+                seqlen = ""
+                for item in seqlens:
+                    seqlen += f"{item} "
+                f.write(seqlen + "\n")
         return micro_batches_this_rank, num_samples_global_micro_batch, cp_sizes
 
     # pre-determine sample arrangement within minibatch and number of micro batch 

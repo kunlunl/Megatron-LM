@@ -6,7 +6,7 @@ set -euo pipefail
 
 TS=`date +%Y_%m_%d_%H_%M_%S`
 
-DATA_PATH=/workspace/hot-switch/Megatron-LM/dataset/github_subset_1.csv
+DATA_PATH=/workspace/hot-switch/dataset/github_subset_1.csv
 # TOKENIZER=/nlp_group/liupeng15/toxiansheng/tokenizer.128k.data_ratio/
 TRAIN_ITERS=200
 
