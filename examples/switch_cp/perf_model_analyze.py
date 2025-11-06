@@ -182,6 +182,12 @@ if __name__ == "__main__":
             samples[key].extend(time)
             sample_to_raw[key].append((seqlen, time))
 
+    # Generate flattened samples to test error on all data
+    flattened_samples = []
+    for key, values in samples.items():
+        for value in values:
+            flattened_samples.append((key, value))
+
     # Get representative values for each sample
     for key in samples:
         samples[key] = get_representative_value(samples[key], method='min')
@@ -250,6 +256,33 @@ if __name__ == "__main__":
         #     input("\nInput any key to continue...")
 
     total = len(valid_samples)
+    print(f"summary on representative values:")
+    print(f"error < 2%: {num_2 / total * 100}%, number of error > 2%: {total - num_2}, total: {total}")
+    print(f"error < 5%: {num_5 / total * 100}%, number of error > 5%: {total - num_5}, total: {total}")
+    print(f"error < 10%: {num_10 / total * 100}%, number of error > 10%: {total - num_10}, total: {total}")
+
+    num_2 = 0
+    num_5 = 0
+    num_10 = 0
+
+    for key, value in flattened_samples:
+        x_2, x, x_s_2, x_s, n, n_s = key
+        x_2 = x_2 / 1024 / 1024
+        x = x / 1024
+        x_s_2 = x_s_2 / 1024 / 1024
+        x_s = x_s / 1024
+        estimated = a * x_2 + b * x + c * x_s_2 + d * x_s + e * n + f * n_s + g
+        error = (estimated - value) / value * 100
+
+        if abs(error) < 2:
+            num_2 += 1
+        if abs(error) < 5:
+            num_5 += 1
+        if abs(error) < 10:
+            num_10 += 1
+    
+    total = len(flattened_samples)
+    print(f"summary on all data:")
     print(f"error < 2%: {num_2 / total * 100}%, number of error > 2%: {total - num_2}, total: {total}")
     print(f"error < 5%: {num_5 / total * 100}%, number of error > 5%: {total - num_5}, total: {total}")
     print(f"error < 10%: {num_10 / total * 100}%, number of error > 10%: {total - num_10}, total: {total}")
