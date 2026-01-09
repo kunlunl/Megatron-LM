@@ -39,7 +39,7 @@ def wrap_dataloader(
 
     Args:
         data_iterator: The original data_iterator to wrap around
-        config: The config object containing the max_seqlen_per_cp_rank
+        config: The config object containing the max_seqlen_per_dp_cp_rank
         dp_cp_group: Data parallel context parallel group.
     """
 
@@ -423,7 +423,7 @@ def wrap_dataloader(
     dev = torch.cuda.current_device()
 
     scheduler = scheduler_map[scheduler_type](
-        config.max_seqlen_per_cp_rank,
+        config.max_seqlen_per_dp_cp_rank,
         parallel_state.get_context_parallel_world_size(),
         parallel_state.get_data_parallel_world_size(),
         # When VPP is enabled, align num_micro_batches to this multiple.
@@ -743,13 +743,13 @@ class BaseScheduler:
 
     def __init__(
         self,
-        max_seqlen_per_cp_rank: Optional[int],
+        max_seqlen_per_dp_cp_rank: Optional[int],
         cp_size: int,
         dp_size: int,
         microbatch_group_size_per_vp_stage: Optional[int],
         hybrid_context_parallel: bool = False,
     ):
-        self.max_seqlen_per_cp_rank = max_seqlen_per_cp_rank
+        self.max_seqlen_per_dp_cp_rank = max_seqlen_per_dp_cp_rank
         self.cp_size = cp_size
         self.dp_size = dp_size
         self.microbatch_group_size_per_vp_stage = microbatch_group_size_per_vp_stage
@@ -778,14 +778,14 @@ class EmptyPackingScheduler(BaseScheduler):
 
     def __init__(
         self,
-        max_seqlen_per_cp_rank,
+        max_seqlen_per_dp_cp_rank,
         cp_size,
         dp_size,
         microbatch_group_size_per_vp_stage,
         hybrid_context_parallel: bool = False,
     ):
         super().__init__(
-            max_seqlen_per_cp_rank,
+            max_seqlen_per_dp_cp_rank,
             cp_size,
             dp_size,
             microbatch_group_size_per_vp_stage,
@@ -854,14 +854,14 @@ class EmptyNoPackingScheduler(BaseScheduler):
 
     def __init__(
         self,
-        max_seqlen_per_cp_rank,
+        max_seqlen_per_dp_cp_rank,
         cp_size,
         dp_size,
         microbatch_group_size_per_vp_stage,
         hybrid_context_parallel: bool = False,
     ):
         super().__init__(
-            max_seqlen_per_cp_rank,
+            max_seqlen_per_dp_cp_rank,
             cp_size,
             dp_size,
             microbatch_group_size_per_vp_stage,
@@ -941,20 +941,20 @@ class NaiveSequencePackingScheduler(BaseScheduler):
 
     def __init__(
         self,
-        max_seqlen_per_cp_rank,
+        max_seqlen_per_dp_cp_rank,
         cp_size,
         dp_size,
         microbatch_group_size_per_vp_stage,
         hybrid_context_parallel: bool = False,
     ):
         super().__init__(
-            max_seqlen_per_cp_rank,
+            max_seqlen_per_dp_cp_rank,
             cp_size,
             dp_size,
             microbatch_group_size_per_vp_stage,
             hybrid_context_parallel=hybrid_context_parallel,
         )
-        self.max_seq_len_all_ranks = self.max_seqlen_per_cp_rank * self.cp_size
+        self.max_seq_len_all_ranks = self.max_seqlen_per_dp_cp_rank * self.cp_size
 
     def check_require_sample_keys(self, batch: List[Dict]):
         """
@@ -1058,20 +1058,20 @@ class DefaultHybridCPscheduler(BaseScheduler):
 
     def __init__(
         self,
-        max_seqlen_per_cp_rank,
+        max_seqlen_per_dp_cp_rank,
         cp_size,
         dp_size,
         microbatch_group_size_per_vp_stage,
         hybrid_context_parallel: bool = False,
     ):
         super().__init__(
-            max_seqlen_per_cp_rank,
+            max_seqlen_per_dp_cp_rank,
             cp_size,
             dp_size,
             microbatch_group_size_per_vp_stage,
             hybrid_context_parallel=hybrid_context_parallel,
         )
-        self.max_seq_len_per_rank = self.max_seqlen_per_cp_rank
+        self.max_seq_len_per_rank = self.max_seqlen_per_dp_cp_rank
         self.total_hdp_gpus = self.dp_size * self.cp_size
 
     def check_require_sample_keys(self, batch: List[Dict]):

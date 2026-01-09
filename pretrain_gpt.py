@@ -15,7 +15,7 @@ from megatron.core.datasets.data_schedule import get_batch_on_this_rank_for_sequ
 from megatron.core.enums import ModelType
 from megatron.core.models.gpt import GPTModel
 from megatron.core.rerun_state_machine import get_rerun_state_machine
-from megatron.core.utils import get_attr_wrapped_model, get_thd_batch_on_this_cp_rank, StragglerDetector
+from megatron.core.utils import get_attr_wrapped_model, StragglerDetector
 from megatron.core.tokenizers.text.utils.build_tokenizer import build_tokenizer
 from megatron.core.transformer.multi_token_prediction import mtp_on_this_rank, get_mtp_ranks
 from megatron.training.arguments import core_transformer_config_from_args
@@ -47,7 +47,8 @@ def get_batch(data_iterator, vp_stage: Optional[int] = None):
     config = core_transformer_config_from_args(args)
 
     if args.sequence_packing:
-        return get_batch_on_this_rank_for_sequence_packing(data_iterator, 
+        return get_batch_on_this_rank_for_sequence_packing(
+            data_iterator,
             mtp_on_this_rank=mtp_on_this_rank(config, ignore_virtual=False, vp_stage=vp_stage),
             vp_stage=vp_stage,
             hybrid_context_parallel=args.hybrid_context_parallel,

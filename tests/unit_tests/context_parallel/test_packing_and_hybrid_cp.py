@@ -172,7 +172,7 @@ def create_args():
     args.world_size = 8
     args.seq_length = 8192
     args.max_position_embeddings = 8192
-    args.max_seqlen_per_cp_rank = None
+    args.max_seqlen_per_dp_cp_rank = None
     args.variable_seq_lengths = False
     args.moe_token_dispatcher_type = "allgather"
 
@@ -209,7 +209,7 @@ def initialize_gpt_model(
             args, "hybrid_context_parallel_scheduler", "balanced"
         ),
         sft_sequence_packing=getattr(args, "sft_sequence_packing", False),
-        max_seqlen_per_cp_rank=getattr(args, "max_seqlen_per_cp_rank", None),
+        max_seqlen_per_dp_cp_rank=getattr(args, "max_seqlen_per_dp_cp_rank", None),
         virtual_pipeline_model_parallel_size=args.virtual_pipeline_model_parallel_size,
         hidden_dropout=args.hidden_dropout,
         attention_dropout=args.attention_dropout,
@@ -468,9 +468,9 @@ def dummy_forward_func(
         )
         args.moe_token_dispatcher_type = "alltoall"
         if is_hybrid_context_parallel:
-            args.max_seqlen_per_cp_rank = args.seq_length // args.data_parallel_size
+            args.max_seqlen_per_dp_cp_rank = args.seq_length // args.data_parallel_size
         else:
-            args.max_seqlen_per_cp_rank = args.seq_length // args.context_parallel_size
+            args.max_seqlen_per_dp_cp_rank = args.seq_length // args.context_parallel_size
 
     set_global_variables(args)
     # set_args(args)
