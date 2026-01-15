@@ -280,10 +280,16 @@ class GatedDeltaNet(MegatronModule):
         """
         # TODO: Deal with attention_mask
 
+        cp_size = self.cp_size
+        cp_group = self.pg_collection.cp
+        if packed_seq_params is not None and packed_seq_params.local_cp_size is not None:
+            cp_size = packed_seq_params.local_cp_size
+            cp_group = packed_seq_params.cp_group
+
         inference_context = deprecate_inference_params(inference_context, inference_params)
 
         seq_len, batch, _ = hidden_states.shape
-        seq_len = seq_len * self.sp_size * self.cp_size
+        seq_len = seq_len * self.sp_size * cp_size
 
         if inference_context is not None:
             assert (
@@ -296,11 +302,15 @@ class GatedDeltaNet(MegatronModule):
         if packed_seq_params is not None:
             assert batch == 1, "Packed sequence expects batch dimension to be 1"
             # Prefer cu_seqlens_q_padded if available, otherwise use cu_seqlens_q
-            cu_seqlens_q = packed_seq_params.cu_seqlens_q_padded or packed_seq_params.cu_seqlens_q
+            if packed_seq_params.cu_seqlens_q_padded is not None:
+                cu_seqlens_q = packed_seq_params.cu_seqlens_q_padded
+            else:
+                cu_seqlens_q = packed_seq_params.cu_seqlens_q
             # Prefer cu_seqlens_kv_padded if available, otherwise use cu_seqlens_kv
-            cu_seqlens_kv = (
-                packed_seq_params.cu_seqlens_kv_padded or packed_seq_params.cu_seqlens_kv
-            )
+            if packed_seq_params.cu_seqlens_kv_padded is not None:
+                cu_seqlens_kv = packed_seq_params.cu_seqlens_kv_padded
+            else:
+                cu_seqlens_kv = packed_seq_params.cu_seqlens_kv
             assert torch.equal(cu_seqlens_q, cu_seqlens_kv), (
                 "Currently only support cu_seqlens_q equals to cu_seqlens_kv, "
                 f"but got {cu_seqlens_q=} and {cu_seqlens_kv=}"
@@ -318,14 +328,14 @@ class GatedDeltaNet(MegatronModule):
 
         # CP All to All: CP to HP
         if packed_seq_params is not None:
-            unpacked_qkvzba = _unpack_sequence(qkvzba, cu_seqlens_q // self.cp_size, dim=0)
+            unpacked_qkvzba = _unpack_sequence(qkvzba, cu_seqlens_q // cp_size, dim=0)
             outputs = []
             for qkvzba_i in unpacked_qkvzba:
                 qkvzba_i = tensor_a2a_cp2hp(
                     qkvzba_i,
                     seq_dim=0,
                     head_dim=-1,
-                    cp_group=self.pg_collection.cp,
+                    cp_group=cp_group,
                     split_sections=[
                         self.qk_dim_local_tp,
                         self.qk_dim_local_tp,
@@ -342,7 +352,7 @@ class GatedDeltaNet(MegatronModule):
                 qkvzba,
                 seq_dim=0,
                 head_dim=-1,
-                cp_group=self.pg_collection.cp,
+                cp_group=cp_group,
                 split_sections=[
                     self.qk_dim_local_tp,
                     self.qk_dim_local_tp,
@@ -361,10 +371,10 @@ class GatedDeltaNet(MegatronModule):
         qkv, gate, beta, alpha = torch.split(
             qkvzba,
             [
-                (self.qk_dim_local_tp * 2 + self.v_dim_local_tp) // self.cp_size,
-                self.v_dim_local_tp // self.cp_size,
-                self.num_value_heads // self.tp_size // self.cp_size,
-                self.num_value_heads // self.tp_size // self.cp_size,
+                (self.qk_dim_local_tp * 2 + self.v_dim_local_tp) // cp_size,
+                self.v_dim_local_tp // cp_size,
+                self.num_value_heads // self.tp_size // cp_size,
+                self.num_value_heads // self.tp_size // cp_size,
             ],
             dim=-1,
         )
@@ -378,19 +388,19 @@ class GatedDeltaNet(MegatronModule):
             unpacked_qkv = _unpack_sequence(qkv, cu_seqlens_q)
             outputs = []
             for qkv_i in unpacked_qkv:
-                qkv_i = self._conv1d_on_qkv(qkv_i)
+                qkv_i = self._conv1d_on_qkv(qkv_i, cp_size=cp_size, cp_group=cp_group)
                 outputs.append(qkv_i)
             qkv = torch.cat(outputs, dim=1)
         else:
-            qkv = self._conv1d_on_qkv(qkv)
+            qkv = self._conv1d_on_qkv(qkv, cp_size=cp_size, cp_group=cp_group)
         nvtx_range_pop(suffix="conv1d")
         # Split qkv into query, key, and value
         query, key, value = torch.split(
             qkv,
             [
-                self.qk_dim_local_tp // self.cp_size,
-                self.qk_dim_local_tp // self.cp_size,
-                self.v_dim_local_tp // self.cp_size,
+                self.qk_dim_local_tp // cp_size,
+                self.qk_dim_local_tp // cp_size,
+                self.v_dim_local_tp // cp_size,
             ],
             dim=-1,
         )
@@ -415,9 +425,9 @@ class GatedDeltaNet(MegatronModule):
 
         # Calculate g and beta
         nvtx_range_push(suffix="g_and_beta")
-        A_log_local_cp = get_parameter_local_cp(self.A_log, dim=0, cp_group=self.pg_collection.cp)
+        A_log_local_cp = get_parameter_local_cp(self.A_log, dim=0, cp_group=cp_group)
         dt_bias_local_cp = get_parameter_local_cp(
-            self.dt_bias, dim=0, cp_group=self.pg_collection.cp
+            self.dt_bias, dim=0, cp_group=cp_group
         )
         g = -A_log_local_cp.exp() * F.softplus(alpha.float() + dt_bias_local_cp)  # In fp32
         beta = beta.sigmoid()
@@ -482,13 +492,13 @@ class GatedDeltaNet(MegatronModule):
             outputs = []
             for norm_out_i in unpacked_norm_out:
                 norm_out_i = tensor_a2a_hp2cp(
-                    norm_out_i, seq_dim=0, head_dim=-1, cp_group=self.pg_collection.cp
+                    norm_out_i, seq_dim=0, head_dim=-1, cp_group=cp_group
                 )
                 outputs.append(norm_out_i)
             norm_out = torch.cat(outputs, dim=0)
         else:
             norm_out = tensor_a2a_hp2cp(
-                norm_out, seq_dim=0, head_dim=-1, cp_group=self.pg_collection.cp
+                norm_out, seq_dim=0, head_dim=-1, cp_group=cp_group
             )
 
         # Output projection
@@ -498,7 +508,7 @@ class GatedDeltaNet(MegatronModule):
 
         return out, out_bias
 
-    def _conv1d_on_qkv(self, qkv):
+    def _conv1d_on_qkv(self, qkv, cp_size, cp_group):
         qkv = qkv.transpose(1, 2).contiguous()  # b, s, d -> b, d, s
         seq_len = qkv.shape[2]
         qkv_channels_split_sections = [
@@ -509,14 +519,14 @@ class GatedDeltaNet(MegatronModule):
         conv1d_weight = get_parameter_local_cp(
             self.conv1d.weight,
             dim=0,
-            cp_group=self.pg_collection.cp,
+            cp_group=cp_group,
             split_sections=qkv_channels_split_sections,
         )
         conv1d_bias = (
             get_parameter_local_cp(
                 self.conv1d.bias,
                 dim=0,
-                cp_group=self.pg_collection.cp,
+                cp_group=cp_group,
                 split_sections=qkv_channels_split_sections,
             )
             if self.conv_bias
@@ -530,7 +540,7 @@ class GatedDeltaNet(MegatronModule):
                 stride=self.conv1d.stride,
                 padding=self.conv1d.padding,
                 dilation=self.conv1d.dilation,
-                groups=self.conv_dim_local_tp // self.cp_size,
+                groups=self.conv_dim_local_tp // cp_size,
             )
             qkv = self.act_fn(conv_out[..., :seq_len])
         else:
@@ -649,7 +659,7 @@ def _unpack_sequence(x, cu_seqlens, dim=1):
         idx_start = cu_seqlens[i].item()
         idx_end = cu_seqlens[i + 1].item()
         chunked_index = [slice(None)] * dim + [slice(idx_start, idx_end)]
-        unpacked_x.append(x[chunked_index])
+        unpacked_x.append(x[tuple(chunked_index)])
     return unpacked_x
 
 
@@ -760,7 +770,7 @@ def get_parameter_local_cp(
     slices = [slice(None)] * param.dim()
     dim_size = param.size(dim=dim)
     slices[dim] = slice(cp_rank * dim_size // cp_size, (cp_rank + 1) * dim_size // cp_size)
-    param = param[slices]
+    param = param[tuple(slices)]
     return param
 
 
