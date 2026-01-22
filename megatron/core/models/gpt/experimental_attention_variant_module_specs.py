@@ -6,6 +6,10 @@ from megatron.core.fusions.fused_bias_dropout import get_bias_dropout_add
 from megatron.core.models.backends import BackendSpecProvider
 from megatron.core.ssm.gated_delta_net import GatedDeltaNet, GatedDeltaNetSubmodules
 from megatron.core.transformer.enums import AttnMaskType, LayerType
+from megatron.core.transformer.experimental_attention_variant.absorbed_mla import (
+    AbsorbedMLASelfAttention,
+    AbsorbedMLASelfAttentionSubmodules,
+)
 from megatron.core.transformer.experimental_attention_variant.dsa import (
     DSAIndexer,
     DSAIndexerSubmodules,
@@ -13,10 +17,6 @@ from megatron.core.transformer.experimental_attention_variant.dsa import (
     DSAttentionSubmodules,
 )
 from megatron.core.transformer.identity_op import IdentityOp
-from megatron.core.transformer.multi_latent_attention import (
-    MLASelfAttention,
-    MLASelfAttentionSubmodules,
-)
 from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_block import (
     TransformerBlockSubmodules,
@@ -91,6 +91,9 @@ def get_dsa_module_spec_for_backend(
         if config.qk_layernorm
         else backend.column_parallel_linear()
     )
+    linear_q_up_proj = backend.column_parallel_linear()
+    linear_k_up_proj = backend.column_parallel_linear()
+    linear_v_up_proj = backend.column_parallel_linear()
 
     # Because TransformerEngine does not support sparse attention yet, we use local
     # implementation whether the backend is TransformerEngine or not.
@@ -110,19 +113,21 @@ def get_dsa_module_spec_for_backend(
     )
 
     attention = ModuleSpec(
-        module=MLASelfAttention,
+        module=AbsorbedMLASelfAttention,
         params={"attn_mask_type": AttnMaskType.causal},
-        submodules=MLASelfAttentionSubmodules(
+        submodules=AbsorbedMLASelfAttentionSubmodules(
             linear_q_proj=backend.column_parallel_linear(),
             linear_q_down_proj=backend.linear(),
             linear_q_up_proj=linear_q_up_proj,
-            linear_kv_down_proj=backend.linear(),
-            linear_kv_up_proj=linear_kv_up_proj,
+            linear_kv_down_proj=linear_kv_down_proj,
+            linear_k_up_proj=linear_k_up_proj,
+            linear_v_up_proj=linear_v_up_proj,
             core_attention=core_attention,
             linear_proj=backend.row_parallel_linear(),
             q_layernorm=IdentityOp,
             kv_layernorm=IdentityOp,
         ),
+        metainfo={"fuse_input_layernorm": True},
     )
 
     return attention
@@ -138,6 +143,8 @@ def get_experimental_attention_variant_module_spec(
 
     if config.experimental_attention_variant == "gated_delta_net":
         return get_gated_delta_net_module_spec(config=config, backend=backend)
+    elif config.experimental_attention_variant == "dsa":
+        return get_dsa_module_spec_for_backend(config=config, backend=backend)
     else:
         raise ValueError(
             f"Invalid experimental attention variant: {config.experimental_attention_variant}"
