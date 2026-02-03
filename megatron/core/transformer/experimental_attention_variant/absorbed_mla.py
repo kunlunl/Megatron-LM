@@ -375,12 +375,12 @@ class AbsorbedMLASelfAttention(Attention):
         packed_seq = packed_seq_params is not None and packed_seq_params.qkv_format == 'thd'
         if self.config.rope_type == "rope":
             rotary_pos_emb = self.rotary_pos_emb(
-                rotary_seq_len, packed_seq_params=packed_seq_params
+                rotary_seq_len, packed_seq=packed_seq_params
             )
         else:
             if self.config.apply_rope_fusion:
                 rotary_pos_cos, rotary_pos_sin = self.rotary_pos_emb.get_cached_cos_sin(
-                    rotary_seq_len, dtype=hidden_states.dtype, packed_seq_params=packed_seq_params
+                    rotary_seq_len, dtype=hidden_states.dtype, packed_seq=packed_seq_params
                 )
                 rotary_pos_emb = None
                 assert inference_context is None, "Inference with MLA RoPE fusion is not supported"
@@ -390,7 +390,7 @@ class AbsorbedMLASelfAttention(Attention):
                 ), "Fused MLA RoPE apply is not imported successfully"
             else:
                 rotary_pos_emb, mscale = self.rotary_pos_emb(
-                    rotary_seq_len, packed_seq_params=packed_seq_params
+                    rotary_seq_len, packed_seq=packed_seq_params
                 )
 
         if packed_seq_params is not None and packed_seq_params.qkv_format == 'thd':
@@ -744,9 +744,9 @@ class AbsorbedMLASelfAttention(Attention):
                 q_absorbed,
                 kv_compressed,
                 None,
+                attention_mask,
                 hidden_states,
                 q_compressed,
-                attention_mask,
                 packed_seq_params=packed_seq_params,
             )
         else:
@@ -754,9 +754,9 @@ class AbsorbedMLASelfAttention(Attention):
                 q_absorbed,
                 kv_compressed,
                 None,
+                attention_mask,
                 hidden_states,
                 q_compressed,
-                attention_mask,
                 packed_seq_params=packed_seq_params,
                 attn_mask_type=self.attn_mask_type,
             )
