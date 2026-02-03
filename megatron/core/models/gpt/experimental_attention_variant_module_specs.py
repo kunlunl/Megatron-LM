@@ -81,16 +81,6 @@ def get_dsa_module_spec_for_backend(
     assert config.multi_latent_attention, "Currently only MLA supports sparse attention."
     assert config.qk_l2_norm is False, "qk_l2_norm is not supported with MLA."
 
-    linear_q_up_proj = (
-        backend.column_parallel_layer_norm_linear()
-        if config.qk_layernorm
-        else backend.column_parallel_linear()
-    )
-    linear_kv_up_proj = (
-        backend.column_parallel_layer_norm_linear()
-        if config.qk_layernorm
-        else backend.column_parallel_linear()
-    )
     linear_q_up_proj = backend.column_parallel_linear()
     linear_k_up_proj = backend.column_parallel_linear()
     linear_v_up_proj = backend.column_parallel_linear()
@@ -119,7 +109,7 @@ def get_dsa_module_spec_for_backend(
             linear_q_proj=backend.column_parallel_linear(),
             linear_q_down_proj=backend.linear(),
             linear_q_up_proj=linear_q_up_proj,
-            linear_kv_down_proj=linear_kv_down_proj,
+            linear_kv_down_proj=backend.linear(),
             linear_k_up_proj=linear_k_up_proj,
             linear_v_up_proj=linear_v_up_proj,
             core_attention=core_attention,
