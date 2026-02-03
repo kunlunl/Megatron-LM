@@ -1183,11 +1183,11 @@ class DSAttention(MegatronModule):
                     and self.k_channels == 576
                     and self.v_channels == 512
                 ):
-                    print("Using fused MQA kernel")
                     # Currently fused kernel only supports specific config combination.
+                    # print("Using fused MQA kernel")
                     output = FusedDSAMQA.apply(query, key, self.v_channels, topk_indices, self.softmax_scale)
                 else:
-                    print("Using unfused MQA kernel")
+                    # print("Using unfused MQA kernel")
                     output = unfused_dsa_fn_mqa(query, key, self.v_channels, topk_indices, self.softmax_scale)
             else:
                 # Standard MHA mode
@@ -1208,6 +1208,22 @@ class DSAttention(MegatronModule):
             # ===================================
             # Run sparse attention kernel
             # ===================================
-            output = unfused_dsa_fn(query, key, value, topk_indices, self.softmax_scale)
+            if is_mqa:
+                # MQA mode: use the MQA-optimized function
+                force_unfused = getattr(self, 'force_unfused_dsa', False)
+                if (
+                    not force_unfused
+                    and FusedDSAMQA is not None
+                    and self.k_channels == 576
+                    and self.v_channels == 512
+                ):
+                    # Currently fused kernel only supports specific config combination.
+                    output = FusedDSAMQA.apply(query, key, self.v_channels, topk_indices, self.softmax_scale)
+                else:
+                    output = unfused_dsa_fn_mqa(query, key, self.v_channels, topk_indices, self.softmax_scale)
+            else:
+                # Standard MHA mode
+                # Output shape: [sq, b, np * hnv] (flattened)
+                output = unfused_dsa_fn(query, key, value, topk_indices, self.softmax_scale)
 
         return output
