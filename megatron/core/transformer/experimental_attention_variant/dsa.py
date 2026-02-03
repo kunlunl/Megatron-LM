@@ -867,11 +867,18 @@ class DSAttention(MegatronModule):
         # ===================================
         if is_mqa:
             # MQA mode: use the MQA-optimized function
-            # FusedDSAMQA = None
-            if b != 1 and self.k_channels == 576 and self.v_channels == 512 and FusedDSAMQA is not None:
+            force_unfused = getattr(self, 'force_unfused_dsa', False)
+            if (
+                not force_unfused
+                and FusedDSAMQA is not None
+                and self.k_channels == 576
+                and self.v_channels == 512
+            ):
+                print("Using fused MQA kernel")
                 # Currently fused kernel only supports specific config combination.
                 output = FusedDSAMQA.apply(query, key, self.v_channels, topk_indices, self.softmax_scale)
             else:
+                print("Using unfused MQA kernel")
                 output = unfused_dsa_fn_mqa(query, key, self.v_channels, topk_indices, self.softmax_scale)
         else:
             # Standard MHA mode

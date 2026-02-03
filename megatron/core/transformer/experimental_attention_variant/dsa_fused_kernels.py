@@ -308,6 +308,8 @@ def bwd(
     dtype="bfloat16",
     accum_dtype="float",
 ):
+    assert H == 128, 'only support H=128'
+    assert kv_group == 1, 'only support kv_group=1'
     assert is_causal == True, 'non-casual is not supported now'
     assert topk % block_size == 0, 'otherwise will load some index=0 thus causing wrong kv to be loaded'
     assert dtype == "bfloat16"
@@ -318,7 +320,8 @@ def bwd(
         sm_scale = (D + D_tail)**(-0.5)
     sm_scale_mul_reciprocal_log2 = sm_scale * 1.44269504  # log2(e)
 
-    H_kv = H // kv_group
+    kv_group_view = 2
+    H_kv = H // kv_group_view
     q_shape = [B, S, H, D + D_tail]
     k_shape = [B, S_kv, kv_group, D + D_tail]
     o_shape = [B, S, H, D]
@@ -347,7 +350,7 @@ def bwd(
             dQ: T.Tensor(q_shape, dtype),
             dKV: T.Tensor(k_shape, accum_dtype),
     ):
-        with T.Kernel(S, B, kv_group, threads=threads) as (s_i, by, bz):
+        with T.Kernel(S, B, kv_group_view, threads=threads) as (s_i, by, bz):
             Q_shared = T.alloc_shared([padded_H, D], dtype)
             Q_tail_shared = T.alloc_shared([padded_H, D_tail], dtype)
             KV_shared = T.alloc_shared([BS, D], dtype)
@@ -387,7 +390,7 @@ def bwd(
             for i_i in T.Pipelined(NS, num_stages=num_stages):
                 # Check which indices are valid
                 for bi_i in T.Parallel(BS):
-                    mask[bi_i] = Indices[by, s_i, bz, i_i * BS + bi_i] <= max_kv_i
+                    mask[bi_i] = Indices[by, s_i, 0, i_i * BS + bi_i] <= max_kv_i
 
                 # Compute attention scores
                 for h_i, bi_i in T.Parallel(padded_H, BS):
@@ -395,13 +398,13 @@ def bwd(
 
                 # Load KV, V for this block of indices
                 for bi_i, d_i in T.Parallel(BS, D):
-                    KV_shared[bi_i, d_i] = KV[by, Indices[by, s_i, bz, i_i * BS + bi_i], bz, d_i]
+                    KV_shared[bi_i, d_i] = KV[by, Indices[by, s_i, 0, i_i * BS + bi_i], 0, d_i] # only support qhead=128, kvhead=1
 
                 T.gemm(
                     Q_shared, KV_shared, acc_p, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
 
                 for bi_i, d_i in T.Parallel(BS, D_tail):
-                    KV_tail_shared[bi_i, d_i] = KV[by, Indices[by, s_i, bz, i_i * BS + bi_i], bz,
+                    KV_tail_shared[bi_i, d_i] = KV[by, Indices[by, s_i, 0, i_i * BS + bi_i], 0,
                                                    D + d_i]
                 T.gemm(
                     Q_tail_shared,
@@ -467,14 +470,14 @@ def bwd(
 
                     for bi_i, d_i in T.Parallel(BS // split_store, D // 4):
                         T.atomic_addx4(
-                            dKV[by, Indices[by, s_i, bz, i_i * BS + bi_i + s * (BS // split_store)],
-                                bz, d_i * 4], acc_dkv_shared[bi_i, d_i * 4])
+                            dKV[by, Indices[by, s_i, 0, i_i * BS + bi_i + s * (BS // split_store)],
+                                0, d_i * 4], acc_dkv_shared[bi_i, d_i * 4])
 
                     # Atomically update dKV, dKV_tail tensors
                     for bi_i, d_i in T.Parallel(BS // split_store, D_tail // 4):
                         T.atomic_addx4(
-                            dKV[by, Indices[by, s_i, bz, i_i * BS + bi_i + s * (BS // split_store)],
-                                bz, D + d_i * 4], acc_dkv_tail_shared[bi_i, d_i * 4])
+                            dKV[by, Indices[by, s_i, 0, i_i * BS + bi_i + s * (BS // split_store)],
+                                0, D + d_i * 4], acc_dkv_tail_shared[bi_i, d_i * 4])
 
             # Store the accumulated dQ
             T.copy(acc_dq, dQ_shared)
@@ -530,25 +533,50 @@ def sparse_mla_bwd(q,
     return dq, dkv
 
 
+def _to_bshd_layout(tensor):
+    """Convert tensor from [s, b, h, d] to [b, s, h, d] with proper strides.
+
+    When b=1, transpose().contiguous() may not create proper strides because
+    stride[0] == stride[1]. Use reshape to force correct memory layout.
+    """
+    s, b, h, d = tensor.shape
+    # Reshape forces a copy with correct strides: (s*h*d, h*d, d, 1)
+    return tensor.permute(1, 0, 2, 3).reshape(b, s, h, d).contiguous()
+
+
 class FusedDSAMQA(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, query, key, v_channels, topk_indices, softmax_scale):
-        query = query.transpose(0, 1).contiguous()
-        key = key.transpose(0, 1).contiguous()
-        topk_indices = topk_indices.unsqueeze(-2).to(torch.int32)
+        # Convert from [sq, b, np, hn] to [b, sq, np, hn] with proper strides
+        query = _to_bshd_layout(query)
+        key = _to_bshd_layout(key)
+        topk_indices = topk_indices.unsqueeze(-2).to(torch.int32).contiguous()
         tl_out, tl_lse = sparse_mla_fwd_interface(query, key, topk_indices, softmax_scale, d_v=v_channels)
         ctx.save_for_backward(query, key, topk_indices, tl_out, tl_lse)
-        out = tl_out.transpose(0, 1).contiguous()
+        out = tl_out.permute(1, 0, 2, 3).reshape(tl_out.size(1), tl_out.size(0), tl_out.size(2), tl_out.size(3)).contiguous()
         ctx.num_heads = out.size(-2)
         ctx.dim = out.size(-1)
+        ctx.softmax_scale = softmax_scale
         out = out.reshape(*out.shape[:-2], -1)
         return out
 
     @staticmethod
     def backward(ctx, grad_output):
         grad_output = grad_output.reshape(*grad_output.shape[:-1], ctx.num_heads, ctx.dim)
-        grad_output = grad_output.transpose(0, 1).contiguous()
+        # Convert from [sq, b, h, d] to [b, sq, h, d] with proper strides
+        grad_output = _to_bshd_layout(grad_output)
         query, key, topk_indices, tl_out, tl_lse = ctx.saved_tensors
-        tl_dq, tl_dkv = sparse_mla_bwd(query, key, tl_out, grad_output, topk_indices, tl_lse)
-        return tl_dq.transpose(0, 1), tl_dkv.transpose(0, 1), None, None, None
+        tl_dq, tl_dkv = sparse_mla_bwd(
+            query,
+            key,
+            tl_out,
+            grad_output,
+            topk_indices,
+            tl_lse,
+            sm_scale=ctx.softmax_scale,
+        )
+        # Convert back from [b, s, h, d] to [s, b, h, d]
+        dq = tl_dq.permute(1, 0, 2, 3).contiguous()
+        dkv = tl_dkv.permute(1, 0, 2, 3).contiguous()
+        return dq, dkv, None, None, None
