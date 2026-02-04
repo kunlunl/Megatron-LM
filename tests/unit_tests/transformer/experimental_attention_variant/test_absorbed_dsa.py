@@ -211,6 +211,62 @@ def test_functionality(tp_cp: List[int], qkv_format: str, down_proj_use_column_p
     Utils.destroy_model_parallel()
 
 
+def _calculate_flops(config: SimpleNamespace, elapsed_ms: float):
+    B = MBS
+    S = SEQ_LEN
+    H = HIDDEN
+    n_heads = config.num_attention_heads
+    qk_head_dim = config.qk_head_dim
+    qk_pos_emb_head_dim = config.qk_pos_emb_head_dim
+    v_head_dim = config.v_head_dim
+    q_lora_rank = config.q_lora_rank
+    kv_lora_rank = config.kv_lora_rank
+    topk = config.dsa_indexer_topk
+    indexer_n_heads = config.dsa_indexer_n_heads
+    indexer_head_dim = config.dsa_indexer_head_dim
+
+    # q_head_dim in absorbed MLA includes position embedding
+    q_head_dim = qk_head_dim + qk_pos_emb_head_dim  # 128 + 64 = 192
+
+    # Forward FLOPs (multiply-add = 2 ops)
+    # 1. Q down projection: hidden -> q_lora_rank
+    q_down_proj_flops = 2 * B * S * H * q_lora_rank
+    # 2. Q up projection: q_lora_rank -> n_heads * (qk_head_dim + qk_pos_emb_head_dim)
+    q_up_proj_flops = 2 * B * S * q_lora_rank * n_heads * q_head_dim
+    # 3. KV down projection: hidden -> (kv_lora_rank + qk_pos_emb_head_dim)
+    kv_down_proj_flops = 2 * B * S * H * (kv_lora_rank + qk_pos_emb_head_dim)
+    # 4. K absorption: Q @ K_up_weight^T, absorbed into Q before attention
+    #    q_no_pe [S, n_heads, qk_head_dim] @ k_up_weight [n_heads, qk_head_dim, kv_lora_rank]
+    #    -> q_absorbed [S, n_heads, kv_lora_rank]
+    k_absorption_flops = 2 * B * S * n_heads * qk_head_dim * kv_lora_rank
+    # 5. DSA Indexer: Q@K^T for indexer heads (full attention for selection)
+    indexer_qk_flops = 2 * B * indexer_n_heads * S * S * indexer_head_dim
+    # 6. Sparse Attention (top-k): Q@K^T and scores@V in absorbed space
+    #    Q: [S, n_heads, kv_lora_rank + qk_pos_emb_head_dim]
+    #    K: [S, 1, kv_lora_rank + qk_pos_emb_head_dim]
+    #    V: [S, 1, kv_lora_rank]
+    absorbed_k_dim = kv_lora_rank + qk_pos_emb_head_dim
+    sparse_attn_qk_flops = 2 * B * n_heads * S * topk * absorbed_k_dim
+    sparse_attn_sv_flops = 2 * B * n_heads * S * topk * kv_lora_rank
+    sparse_attn_flops = sparse_attn_qk_flops + sparse_attn_sv_flops
+    # 7. V up projection: output @ v_up_weight
+    #    [S, n_heads, kv_lora_rank] @ [n_heads, v_head_dim, kv_lora_rank]^T
+    v_up_proj_flops = 2 * B * S * n_heads * kv_lora_rank * v_head_dim
+    # 8. Output projection: n_heads * v_head_dim -> hidden
+    out_proj_flops = 2 * B * S * n_heads * v_head_dim * H
+
+    fwd_flops = (q_down_proj_flops + q_up_proj_flops + kv_down_proj_flops +
+                 k_absorption_flops + indexer_qk_flops + sparse_attn_flops +
+                 v_up_proj_flops + out_proj_flops)
+
+    # Backward FLOPs ≈ 2x forward for attention, 2x for linear layers
+    bwd_flops = 2 * fwd_flops
+
+    total_flops = fwd_flops + bwd_flops
+    tflops = total_flops / (elapsed_ms * 1e-3) / 1e12
+    return tflops
+
+
 @pytest.mark.parametrize("tp_cp", [[1, 1]])
 @pytest.mark.parametrize("qkv_format", ['sbhd'])
 @pytest.mark.parametrize("down_proj_use_column_parallel", [False])
@@ -244,7 +300,7 @@ def test_perf(tp_cp: List[int], qkv_format: str, down_proj_use_column_parallel: 
 
     # absorbed_mla.core_attention.force_unfused_dsa = True
     # Forward & Backward
-    for _ in range(10):
+    for _ in range(3):
         for name, param in absorbed_mla.named_parameters():
             if param.grad is not None:
                 param.grad.zero_()
@@ -252,6 +308,26 @@ def test_perf(tp_cp: List[int], qkv_format: str, down_proj_use_column_parallel: 
             hidden_states, attention_mask=None, packed_seq_params=packed_seq_params
         )
         absorbed_outputs.backward(grads)
+
+    event_start = torch.cuda.Event(enable_timing=True)
+    event_end = torch.cuda.Event(enable_timing=True)
+    event_start.record()
+    N_TESTS = 10
+    for _ in range(N_TESTS):
+        for name, param in absorbed_mla.named_parameters():
+            if param.grad is not None:
+                param.grad.zero_()
+        absorbed_outputs, _ = absorbed_mla(
+            hidden_states, attention_mask=None, packed_seq_params=packed_seq_params
+        )
+        absorbed_outputs.backward(grads)
+    event_end.record()
+    torch.cuda.synchronize()
+    elapsed_ms = event_start.elapsed_time(event_end) / N_TESTS
+    print(f"Time taken: {elapsed_ms:.2f} ms")
+
+    tflops = _calculate_flops(config, elapsed_ms)
+    print(f"Achieved: {tflops:.2f} TFLOPs/s")
 
     print(f"CUDA memory allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
     print(f"CUDA memory reserved: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
